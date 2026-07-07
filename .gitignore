@@ -1,0 +1,11 @@
+build/
+.vs/
+out/
+.worktrees/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+docs/*
+!docs/*.md
+.codegraph/
