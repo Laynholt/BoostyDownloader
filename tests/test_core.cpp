@@ -103,9 +103,9 @@ int main() {
         return 1;
     }
 
-    const std::string releaseJson = R"({"tag_name":"v1.0.1","assets":[{"name":"BoostyDownloader.exe","browser_download_url":"https://example.test/BoostyDownloader.exe"}]})";
+    const std::string releaseJson = R"({"tag_name":"v9.9.9","assets":[{"name":"BoostyDownloader.exe","browser_download_url":"https://example.test/BoostyDownloader.exe"}]})";
     const ReleaseAssetInfo release = ParseGitHubReleaseAsset(releaseJson, "BoostyDownloader.exe");
-    if (!release.found || release.version != L"1.0.1" || !ShouldInstallAppUpdate(release)) {
+    if (!release.found || release.version != L"9.9.9" || !ShouldInstallAppUpdate(release)) {
         return 1;
     }
     const std::string sums = "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD *BoostyDownloader.exe\n";
