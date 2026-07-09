@@ -121,7 +121,7 @@ DialogButton* HitButton(DialogState* state, POINT point) {
 }
 
 RECT MessageTextRect(const RECT& client) {
-    return {94, 66, client.right - 34, client.bottom - 78};
+    return {94, 66, client.right - 34, client.bottom - 86};
 }
 
 int VisibleTextHeight(const RECT& textRect) {
@@ -178,8 +178,11 @@ void LayoutButtons(DialogState* state, const RECT& client) {
     }
     constexpr int width = 132;
     constexpr int height = 34;
-    const int bottom = client.bottom - 20;
-    const int okLeft = client.right - 20 - width;
+    constexpr int panelInset = 12;
+    constexpr int panelPadding = 16;
+    const int right = client.right - panelInset - panelPadding;
+    const int bottom = client.bottom - panelInset - panelPadding;
+    const int okLeft = right - width;
     state->buttons = {{kOk, {okLeft, bottom - height, okLeft + width, bottom}, L"OK", true}};
     if (state->kind == MessageDialogKind::Error) {
         state->buttons.insert(

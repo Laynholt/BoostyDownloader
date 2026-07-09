@@ -770,7 +770,7 @@ void LayoutFfmpegDialog(FfmpegDialogState* state, const RECT& client) {
         return;
     }
     constexpr int panelInset = 16;
-    constexpr int buttonInset = 20;
+    constexpr int buttonInset = 16;
     constexpr int buttonHeight = 42;
     constexpr int buttonGap = 16;
     const RECT panel{panelInset, panelInset, client.right - panelInset, client.bottom - panelInset};
@@ -814,7 +814,7 @@ void LayoutFfmpegInstallDialog(FfmpegInstallDialogState* state, const RECT& clie
         return;
     }
     constexpr int panelInset = 16;
-    constexpr int buttonInset = 20;
+    constexpr int buttonInset = 16;
     constexpr int buttonHeight = 42;
     const RECT panel{panelInset, panelInset, client.right - panelInset, client.bottom - panelInset};
     const int buttonWidth = state->done && state->success ? 132 : 112;
@@ -1659,10 +1659,13 @@ void LayoutUpdatePromptButtons(UpdatePromptState* state, const RECT& client) {
     constexpr int width = 132;
     constexpr int height = 34;
     constexpr int gap = 12;
-    const int bottom = client.bottom - 20;
+    constexpr int panelInset = 14;
+    constexpr int panelPadding = 16;
+    const int right = client.right - panelInset - panelPadding;
+    const int bottom = client.bottom - panelInset - panelPadding;
     state->buttons = {
-        {kDialogClose, {client.right - 20 - width * 2 - gap, bottom - height, client.right - 20 - width - gap, bottom}, L"Отмена", false, true, true},
-        {kDialogInstall, {client.right - 20 - width, bottom - height, client.right - 20, bottom}, L"Скачать", true, true, true}
+        {kDialogClose, {right - width * 2 - gap, bottom - height, right - width - gap, bottom}, L"Отмена", false, true, true},
+        {kDialogInstall, {right - width, bottom - height, right, bottom}, L"Скачать", true, true, true}
     };
 }
 
@@ -1674,7 +1677,7 @@ void PaintUpdatePrompt(HWND window, UpdatePromptState* state, HDC dc) {
     RECT panel{14, 14, client.right - 14, client.bottom - 14};
     DrawSettingsRoundedPanel(dc, panel, Gdiplus::Color(255, 28, 28, 31), Gdiplus::Color(255, 48, 48, 52), 8);
     DrawTextLine(dc, L"Обновление", {panel.left + 18, panel.top + 18, panel.right - 18, panel.top + 48}, 22, RGB(242, 242, 242));
-    DrawTextLine(dc, state ? state->message : L"", {panel.left + 18, panel.top + 58, panel.right - 18, panel.bottom - 70}, 15, RGB(180, 180, 186), DT_WORDBREAK);
+    DrawTextLine(dc, state ? state->message : L"", {panel.left + 18, panel.top + 62, panel.right - 18, panel.bottom - 92}, 15, RGB(180, 180, 186), DT_LEFT | DT_TOP | DT_WORDBREAK);
     if (state) {
         DrawSettingsButtons(dc, state->buttons, state->pressedButton, state->hotButton);
     }
@@ -1787,8 +1790,8 @@ bool ShowUpdatePrompt(HWND owner, HINSTANCE instance, const std::wstring& messag
     state.message = message;
     RECT ownerRect{};
     GetWindowRect(owner, &ownerRect);
-    constexpr int width = 520;
-    constexpr int height = 224;
+    constexpr int width = 560;
+    constexpr int height = 258;
     HWND dialog = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         wc.lpszClassName,
