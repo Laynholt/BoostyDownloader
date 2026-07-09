@@ -291,7 +291,7 @@ std::filesystem::path BuildTargetPath(const BoostyDownloadRequest& request, cons
 
 std::filesystem::path BuildThumbnailPath(const BoostyDownloadRequest& request, const PostRef& ref, const std::wstring& postTitle) {
     const std::wstring base = SanitizeFileName(postTitle + L" [" + ref.id.substr(0, 8) + L"]");
-    return request.outputDirectory / ref.author / (base + L".thumb.jpg");
+    return request.outputDirectory / ref.author / L"thumbnails" / (base + L".thumb.jpg");
 }
 
 std::filesystem::path WithExtension(const std::filesystem::path& path, const std::wstring& extension) {

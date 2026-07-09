@@ -520,6 +520,7 @@ struct SettingsState {
     AppConfig config;
     const AppPaths* paths = nullptr;
     bool saved = false;
+    bool ffmpegAvailable = false;
     bool ffmpegDetailsExpanded = false;
     bool sidebarCollapsed = false;
     SettingsSection section = SettingsSection::Downloads;
@@ -1403,6 +1404,31 @@ UINT ContainerButtonFromValue(const std::wstring& container) {
     return kContainerAuto;
 }
 
+std::wstring NormalizeQualityForFfmpeg(std::wstring quality, bool ffmpegAvailable) {
+    if (quality.empty()) {
+        return L"highest";
+    }
+    if (!ffmpegAvailable && quality == L"audio") {
+        return L"highest";
+    }
+    return quality;
+}
+
+std::wstring NormalizeContainerForFfmpeg(std::wstring container, bool ffmpegAvailable) {
+    if (container.empty()) {
+        return L"auto";
+    }
+    if (!ffmpegAvailable && container != L"auto") {
+        return L"auto";
+    }
+    return container;
+}
+
+void NormalizeFfmpegDependentSettings(AppConfig& config, bool ffmpegAvailable) {
+    config.quality = NormalizeQualityForFfmpeg(config.quality, ffmpegAvailable);
+    config.container = NormalizeContainerForFfmpeg(config.container, ffmpegAvailable);
+}
+
 bool IsSettingsSidebarCollapsed(const SettingsState* state, int width) {
     return width < kSettingsSidebarCollapseWidth || (state && state->sidebarCollapsed);
 }
@@ -1451,11 +1477,12 @@ void LayoutSettingsButtons(SettingsState* state, const RECT& client) {
     };
     if (state->section == SettingsSection::Downloads) {
         const UINT activeQuality = QualityButtonFromValue(state->config.quality);
+        const bool ffmpegAvailable = state->ffmpegAvailable;
         RECT card = stackCard(0, 112);
         int x = card.left + 18;
         const int qualityWidth = std::max(62, static_cast<int>((card.right - card.left - 36 - 40) / 6));
         state->buttons.insert(state->buttons.end(), {
-            {kQualityAudio, {x, card.top + 66, x + qualityWidth, card.top + 98}, L"Аудио", activeQuality == kQualityAudio, true, true, true},
+            {kQualityAudio, {x, card.top + 66, x + qualityWidth, card.top + 98}, L"Аудио", activeQuality == kQualityAudio, ffmpegAvailable, true, true},
             {kQuality360, {x + (qualityWidth + 8), card.top + 66, x + (qualityWidth + 8) + qualityWidth, card.top + 98}, L"360p", activeQuality == kQuality360, true, true, true},
             {kQuality480, {x + 2 * (qualityWidth + 8), card.top + 66, x + 2 * (qualityWidth + 8) + qualityWidth, card.top + 98}, L"480p", activeQuality == kQuality480, true, true, true},
             {kQuality720, {x + 3 * (qualityWidth + 8), card.top + 66, x + 3 * (qualityWidth + 8) + qualityWidth, card.top + 98}, L"720p", activeQuality == kQuality720, true, true, true},
@@ -1467,10 +1494,10 @@ void LayoutSettingsButtons(SettingsState* state, const RECT& client) {
         const UINT activeContainer = ContainerButtonFromValue(state->config.container);
         const int containerWidth = std::max(76, static_cast<int>((card.right - card.left - 36 - 30) / 4));
         state->buttons.insert(state->buttons.end(), {
-            {kContainerAuto, {x, card.top + 66, x + containerWidth, card.top + 98}, L"Auto", activeContainer == kContainerAuto, true, true, true},
-            {kContainerMp4, {x + (containerWidth + 10), card.top + 66, x + (containerWidth + 10) + containerWidth, card.top + 98}, L"MP4", activeContainer == kContainerMp4, true, true, true},
-            {kContainerMkv, {x + 2 * (containerWidth + 10), card.top + 66, x + 2 * (containerWidth + 10) + containerWidth, card.top + 98}, L"MKV", activeContainer == kContainerMkv, true, true, true},
-            {kContainerWebm, {x + 3 * (containerWidth + 10), card.top + 66, x + 3 * (containerWidth + 10) + containerWidth, card.top + 98}, L"WEBM", activeContainer == kContainerWebm, true, true, true}
+            {kContainerAuto, {x, card.top + 66, x + containerWidth, card.top + 98}, L"Auto", activeContainer == kContainerAuto, ffmpegAvailable, true, true},
+            {kContainerMp4, {x + (containerWidth + 10), card.top + 66, x + (containerWidth + 10) + containerWidth, card.top + 98}, L"MP4", activeContainer == kContainerMp4, ffmpegAvailable, true, true},
+            {kContainerMkv, {x + 2 * (containerWidth + 10), card.top + 66, x + 2 * (containerWidth + 10) + containerWidth, card.top + 98}, L"MKV", activeContainer == kContainerMkv, ffmpegAvailable, true, true},
+            {kContainerWebm, {x + 3 * (containerWidth + 10), card.top + 66, x + 3 * (containerWidth + 10) + containerWidth, card.top + 98}, L"WEBM", activeContainer == kContainerWebm, ffmpegAvailable, true, true}
         });
         card = stackCard(2, 122);
         const int valueRight = card.right - 18 - 46 - 12;
@@ -1806,6 +1833,10 @@ void HandleSettingsCommand(HWND window, SettingsState* state, UINT id) {
         InvalidateRect(window, nullptr, FALSE);
         break;
     case kQualityAudio:
+        if (!state->ffmpegAvailable) {
+            break;
+        }
+        [[fallthrough]];
     case kQuality360:
     case kQuality480:
     case kQuality720:
@@ -1818,6 +1849,9 @@ void HandleSettingsCommand(HWND window, SettingsState* state, UINT id) {
     case kContainerMp4:
     case kContainerMkv:
     case kContainerWebm:
+        if (!state->ffmpegAvailable) {
+            break;
+        }
         state->config.container = ContainerFromButton(id);
         InvalidateRect(window, nullptr, FALSE);
         break;
@@ -1839,7 +1873,10 @@ void HandleSettingsCommand(HWND window, SettingsState* state, UINT id) {
         }
         break;
     case kFfmpegConfigure:
-        if (state->paths && ShowFfmpegModal(window, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)), *state->paths, state->config)) {
+        if (state->paths) {
+            ShowFfmpegModal(window, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)), *state->paths, state->config);
+            state->ffmpegAvailable = ResolveFfmpeg(*state->paths, state->config.ffmpegPath).available;
+            NormalizeFfmpegDependentSettings(state->config, state->ffmpegAvailable);
             InvalidateRect(window, nullptr, FALSE);
         }
         break;
@@ -1968,6 +2005,8 @@ bool ShowSettingsModal(HWND owner, HINSTANCE instance, const AppPaths& paths, Ap
     SettingsState state{};
     state.config = config;
     state.paths = &paths;
+    state.ffmpegAvailable = ResolveFfmpeg(paths, state.config.ffmpegPath).available;
+    NormalizeFfmpegDependentSettings(state.config, state.ffmpegAvailable);
     RECT ownerRect = {};
     GetWindowRect(owner, &ownerRect);
     const int width = kSettingsWindowWidth;
@@ -3232,6 +3271,7 @@ void Application::EnqueueText(const std::wstring& text) {
         return;
     }
     const FfmpegStatus ffmpeg = ResolveFfmpeg(*m_paths, m_config.ffmpegPath);
+    const bool ffmpegAvailable = ffmpeg.available;
     size_t added = 0;
     size_t skipped = 0;
     for (const std::wstring& url : urls) {
@@ -3246,9 +3286,9 @@ void Application::EnqueueText(const std::wstring& text) {
         request.url = url;
         request.outputDirectory = m_config.downloadDir;
         request.auth = {m_config.cookie, m_config.authHeader};
-        request.quality = m_config.quality;
-        request.container = m_config.container;
-        request.ffmpegPath = ffmpeg.executable;
+        request.quality = NormalizeQualityForFfmpeg(m_config.quality, ffmpegAvailable);
+        request.container = NormalizeContainerForFfmpeg(m_config.container, ffmpegAvailable);
+        request.ffmpegPath = ffmpegAvailable ? ffmpeg.executable : std::filesystem::path{};
         m_queue->Enqueue(request, url);
         ++added;
     }
@@ -3367,6 +3407,7 @@ void Application::LoadDownloadQueue() {
     try {
         std::vector<DownloadTaskSnapshot> tasks = DownloadQueueStore::Load(*m_paths);
         const FfmpegStatus ffmpeg = ResolveFfmpeg(*m_paths, m_config.ffmpegPath);
+        const bool ffmpegAvailable = ffmpeg.available;
         for (DownloadTaskSnapshot& task : tasks) {
             task.request.auth = {m_config.cookie, m_config.authHeader};
             if (task.request.outputDirectory.empty()) {
@@ -3375,12 +3416,12 @@ void Application::LoadDownloadQueue() {
             if (task.request.quality.empty()) {
                 task.request.quality = m_config.quality;
             }
+            task.request.quality = NormalizeQualityForFfmpeg(task.request.quality, ffmpegAvailable);
             if (task.request.container.empty()) {
                 task.request.container = m_config.container;
             }
-            if (ffmpeg.available) {
-                task.request.ffmpegPath = ffmpeg.executable;
-            }
+            task.request.container = NormalizeContainerForFfmpeg(task.request.container, ffmpegAvailable);
+            task.request.ffmpegPath = ffmpegAvailable ? ffmpeg.executable : std::filesystem::path{};
         }
         if (!tasks.empty()) {
             m_queue->ImportSnapshots(tasks);
