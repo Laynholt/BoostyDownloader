@@ -156,6 +156,13 @@ HttpRequest OpenRequest(const std::wstring& url, const HttpHeaders& headers, int
     return {std::move(session), std::move(connect), std::move(request)};
 }
 
+HttpHeaders WithRangeHeader(HttpHeaders headers, std::uint64_t offset) {
+    if (offset > 0) {
+        headers.push_back({L"Range", L"bytes=" + std::to_wstring(offset) + L"-"});
+    }
+    return headers;
+}
+
 std::uint64_t QueryContentLength(HINTERNET request) {
     wchar_t buffer[64] = {};
     DWORD size = sizeof(buffer);
@@ -202,9 +209,6 @@ void WinHttpClient::DownloadFile(
     const HttpProgressCallback& onProgress,
     const HttpCancelCallback& isCanceled
 ) {
-    HttpRequest request = OpenRequest(url, headers);
-    const std::uint64_t total = QueryContentLength(request.get());
-
     std::error_code ec;
     std::filesystem::create_directories(target.parent_path(), ec);
     if (ec) {
@@ -212,15 +216,54 @@ void WinHttpClient::DownloadFile(
     }
 
     const std::filesystem::path staged = target.wstring() + L".download";
-    std::filesystem::remove(staged, ec);
-    std::ofstream out(staged, std::ios::binary | std::ios::trunc);
+    if (std::filesystem::is_regular_file(target, ec)) {
+        const std::uint64_t existingSize = std::filesystem::file_size(target, ec);
+        if (!ec && existingSize > 0) {
+            if (onProgress) {
+                onProgress(existingSize, existingSize);
+            }
+            return;
+        }
+    }
+    ec.clear();
+
+    std::uint64_t resumeFrom = 0;
+    if (std::filesystem::is_regular_file(staged, ec)) {
+        resumeFrom = std::filesystem::file_size(staged, ec);
+        if (ec) {
+            resumeFrom = 0;
+            ec.clear();
+        }
+    }
+
+    HttpRequest request;
+    try {
+        request = OpenRequest(url, WithRangeHeader(headers, resumeFrom));
+    } catch (...) {
+        if (resumeFrom == 0) {
+            throw;
+        }
+        resumeFrom = 0;
+        request = OpenRequest(url, headers);
+    }
+    DWORD status = QueryStatusCode(request.get());
+    if (resumeFrom > 0 && status != HTTP_STATUS_PARTIAL_CONTENT) {
+        resumeFrom = 0;
+    }
+    const std::uint64_t contentLength = QueryContentLength(request.get());
+    const std::uint64_t total = resumeFrom > 0 && contentLength > 0 ? resumeFrom + contentLength : contentLength;
+
+    std::ofstream out(staged, std::ios::binary | (resumeFrom > 0 ? std::ios::app : std::ios::trunc));
     if (!out) {
         throw std::runtime_error("failed to open download target");
     }
 
     try {
         std::array<char, 65536> buffer = {};
-        std::uint64_t downloaded = 0;
+        std::uint64_t downloaded = resumeFrom;
+        if (onProgress && downloaded > 0) {
+            onProgress(downloaded, total);
+        }
         while (true) {
             ThrowIfCanceled(isCanceled);
             DWORD available = 0;
@@ -247,7 +290,9 @@ void WinHttpClient::DownloadFile(
         CommitDownloadedFile(staged, target, downloaded, total);
     } catch (...) {
         out.close();
-        std::filesystem::remove(staged, ec);
+        if (!(isCanceled && isCanceled())) {
+            std::filesystem::remove(staged, ec);
+        }
         throw;
     }
 }

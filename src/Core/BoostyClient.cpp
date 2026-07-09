@@ -1,11 +1,14 @@
 #include "BoostyClient.h"
 
+#include "FfmpegTools.h"
 #include "Text.h"
 #include "WinHttpClient.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <cwctype>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -24,6 +27,8 @@ struct VideoChoice {
     std::wstring title;
     std::wstring quality;
 };
+
+std::vector<VideoChoice> PickVideos(const json& post, const std::wstring& quality);
 
 PostRef ParseBoostyPostUrl(const std::wstring& url) {
     const std::wstring marker = L"boosty.to/";
@@ -75,10 +80,25 @@ int RankQuality(const std::wstring& value) {
 }
 
 std::wstring PreferredType(const std::wstring& quality) {
+    if (quality == L"360" || quality == L"low") return L"low";
+    if (quality == L"480" || quality == L"medium") return L"medium";
+    if (quality == L"720" || quality == L"high") return L"high";
+    if (quality == L"1080" || quality == L"full_hd") return L"full_hd";
     if (quality == L"low") return L"low";
     if (quality == L"medium") return L"medium";
     if (quality == L"high") return L"high";
     return L"ultra_hd";
+}
+
+std::wstring QualityLabel(const std::wstring& quality) {
+    if (quality == L"ultra_hd") return L"2160";
+    if (quality == L"quad_hd") return L"1440";
+    if (quality == L"full_hd") return L"1080";
+    if (quality == L"high") return L"720";
+    if (quality == L"medium") return L"480";
+    if (quality == L"low") return L"360";
+    if (quality == L"tiny" || quality == L"lowest") return L"240";
+    return quality;
 }
 
 json ArrayField(const json& value, const char* first, const char* second) {
@@ -94,15 +114,24 @@ json ArrayField(const json& value, const char* first, const char* second) {
 }
 
 VideoChoice PickVideo(const json& post, const std::wstring& quality) {
+    const auto videos = PickVideos(post, quality);
+    if (videos.empty()) {
+        throw std::runtime_error("post has no downloadable Boosty video");
+    }
+    return videos.front();
+}
+
+std::vector<VideoChoice> PickVideos(const json& post, const std::wstring& quality) {
     const std::wstring preferred = PreferredType(quality);
-    VideoChoice best;
-    int bestRank = -1;
+    std::vector<VideoChoice> videos;
 
     for (const auto& chunk : post.value("data", json::array())) {
         if (chunk.value("type", "") != "ok_video" || !chunk.value("complete", false)) {
             continue;
         }
         const std::wstring title = Utf8ToWide(chunk.value("title", "boosty_video"));
+        VideoChoice best;
+        int bestRank = -1;
         for (const auto& item : ArrayField(chunk, "playerUrls", "player_urls")) {
             const std::wstring type = Utf8ToWide(item.value("type", ""));
             const std::wstring url = Utf8ToWide(item.value("url", ""));
@@ -118,11 +147,92 @@ VideoChoice PickVideo(const json& post, const std::wstring& quality) {
                 best = {url, title, type};
             }
         }
+        if (!best.url.empty()) {
+            videos.push_back(std::move(best));
+        }
     }
-    if (best.url.empty()) {
+    if (videos.empty()) {
         throw std::runtime_error("post has no downloadable Boosty video");
     }
-    return best;
+    return videos;
+}
+
+std::wstring PostTitle(const json& post) {
+    const std::wstring title = Utf8ToWide(post.value("title", ""));
+    return title.empty() ? L"boosty_video" : title;
+}
+
+bool LooksLikeImageUrl(const std::wstring& value) {
+    if (!(value.starts_with(L"https://") || value.starts_with(L"http://") || value.starts_with(L"//"))) {
+        return false;
+    }
+    std::wstring lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return lower.find(L".jpg") != std::wstring::npos ||
+        lower.find(L".jpeg") != std::wstring::npos ||
+        lower.find(L".png") != std::wstring::npos ||
+        lower.find(L".webp") != std::wstring::npos;
+}
+
+std::wstring NormalizeMediaUrl(std::wstring value) {
+    if (value.starts_with(L"//")) {
+        value.insert(0, L"https:");
+    }
+    return value;
+}
+
+bool IsThumbnailKey(const std::string& key) {
+    std::string lower = key;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return lower.find("preview") != std::string::npos ||
+        lower.find("thumb") != std::string::npos ||
+        lower.find("cover") != std::string::npos ||
+        lower == "image" ||
+        lower == "imageurl" ||
+        lower == "image_url";
+}
+
+std::wstring FindThumbnailUrl(const json& value, bool keyHint = false) {
+    if (value.is_string()) {
+        const std::wstring candidate = NormalizeMediaUrl(Utf8ToWide(value.get<std::string>()));
+        if ((keyHint && (candidate.starts_with(L"https://") || candidate.starts_with(L"http://"))) || LooksLikeImageUrl(candidate)) {
+            return candidate;
+        }
+        return {};
+    }
+    if (value.is_object()) {
+        for (const auto& [key, child] : value.items()) {
+            if (IsThumbnailKey(key)) {
+                const std::wstring found = FindThumbnailUrl(child, true);
+                if (!found.empty()) {
+                    return found;
+                }
+            }
+        }
+        for (const auto& [key, child] : value.items()) {
+            (void)key;
+            const std::wstring found = FindThumbnailUrl(child, false);
+            if (!found.empty()) {
+                return found;
+            }
+        }
+    } else if (value.is_array()) {
+        for (const auto& child : value) {
+            const std::wstring found = FindThumbnailUrl(child, keyHint);
+            if (!found.empty()) {
+                return found;
+            }
+        }
+    }
+    return {};
+}
+
+std::wstring PostThumbnailUrl(const json& post) {
+    return FindThumbnailUrl(post);
 }
 
 json FindPost(const PostRef& ref, const BoostyAuth& auth, std::stop_token stopToken) {
@@ -166,9 +276,28 @@ json FindPost(const PostRef& ref, const BoostyAuth& auth, std::stop_token stopTo
     throw std::runtime_error("post not found or not available");
 }
 
-std::filesystem::path BuildTargetPath(const BoostyDownloadRequest& request, const PostRef& ref, const VideoChoice& video) {
-    const std::wstring base = SanitizeFileName(video.title + L" [" + ref.id.substr(0, 8) + L"]");
+std::filesystem::path BuildTargetPath(const BoostyDownloadRequest& request, const PostRef& ref, const std::wstring& postTitle, size_t videoIndex, size_t videoCount) {
+    std::wstring base = postTitle;
+    if (videoCount > 1) {
+        std::wostringstream number;
+        number.width(2);
+        number.fill(L'0');
+        number << (videoIndex + 1);
+        base += L" " + number.str();
+    }
+    base = SanitizeFileName(base + L" [" + ref.id.substr(0, 8) + L"]");
     return request.outputDirectory / ref.author / (base + L".mp4");
+}
+
+std::filesystem::path BuildThumbnailPath(const BoostyDownloadRequest& request, const PostRef& ref, const std::wstring& postTitle) {
+    const std::wstring base = SanitizeFileName(postTitle + L" [" + ref.id.substr(0, 8) + L"]");
+    return request.outputDirectory / ref.author / (base + L".thumb.jpg");
+}
+
+std::filesystem::path WithExtension(const std::filesystem::path& path, const std::wstring& extension) {
+    std::filesystem::path result = path;
+    result.replace_extension(extension);
+    return result;
 }
 
 } // namespace
@@ -217,26 +346,84 @@ BoostyDownloadResult DownloadBoostyVideo(
         }
         const PostRef ref = ParseBoostyPostUrl(request.url);
         const json post = FindPost(ref, request.auth, stopToken);
-        const VideoChoice video = PickVideo(post, request.quality);
-        const std::filesystem::path target = BuildTargetPath(request, ref, video);
-
-        if (onProgress) {
-            onProgress({L"Скачивание " + video.quality, 0.0, 0, 0});
+        const std::wstring postTitle = PostTitle(post);
+        const std::wstring thumbnailUrl = PostThumbnailUrl(post);
+        std::filesystem::path thumbnailPath;
+        if (!thumbnailUrl.empty()) {
+            thumbnailPath = BuildThumbnailPath(request, ref, postTitle);
+            try {
+                WinHttpClient::DownloadFile(
+                    thumbnailUrl,
+                    thumbnailPath,
+                    BuildHeaders(request.auth),
+                    {},
+                    [&]() { return stopToken.stop_requested(); }
+                );
+            } catch (...) {
+                thumbnailPath.clear();
+            }
         }
-        WinHttpClient::DownloadFile(
-            video.url,
-            target,
-            BuildHeaders(request.auth),
-            [&](std::uint64_t downloaded, std::uint64_t total) {
-                if (!onProgress) {
-                    return;
+        const std::vector<VideoChoice> videos = PickVideos(post, request.quality);
+        std::vector<std::filesystem::path> outputFiles;
+        outputFiles.reserve(videos.size());
+
+        for (size_t index = 0; index < videos.size(); ++index) {
+            const VideoChoice& video = videos[index];
+            const std::filesystem::path target = BuildTargetPath(request, ref, postTitle, index, videos.size());
+
+            const std::wstring qualityLabel = QualityLabel(video.quality);
+
+            if (onProgress) {
+                onProgress({L"Скачивание " + qualityLabel, 0.0, 0, 0, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, target});
+            }
+            WinHttpClient::DownloadFile(
+                video.url,
+                target,
+                BuildHeaders(request.auth),
+                [&](std::uint64_t downloaded, std::uint64_t total) {
+                    if (!onProgress) {
+                        return;
+                    }
+                    const double percent = total > 0 ? (static_cast<double>(downloaded) / static_cast<double>(total)) * 100.0 : 0.0;
+                    onProgress({L"Скачивание " + qualityLabel, percent, downloaded, total, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, target});
+                },
+                [&]() { return stopToken.stop_requested(); }
+            );
+
+            std::filesystem::path finalTarget = target;
+            const bool audioOnly = request.quality == L"audio";
+            const bool convertContainer =
+                !audioOnly &&
+                !request.container.empty() &&
+                request.container != L"auto" &&
+                request.container != L"mp4";
+            if (audioOnly || convertContainer) {
+                if (request.ffmpegPath.empty()) {
+                    throw std::runtime_error("FFmpeg not found");
                 }
-                const double percent = total > 0 ? (static_cast<double>(downloaded) / static_cast<double>(total)) * 100.0 : 0.0;
-                onProgress({L"Скачивание " + video.quality, percent, downloaded, total});
-            },
-            [&]() { return stopToken.stop_requested(); }
-        );
-        return {true, {}, {target}};
+                std::wstring error;
+                if (audioOnly) {
+                    finalTarget = WithExtension(target, L".m4a");
+                    if (onProgress) {
+                        onProgress({L"Извлечение аудио", 100.0, 0, 0, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, finalTarget});
+                    }
+                } else {
+                    finalTarget = WithExtension(target, L"." + request.container);
+                    if (onProgress) {
+                        onProgress({L"Конвертация в " + request.container, 100.0, 0, 0, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, finalTarget});
+                    }
+                }
+                if (!ConvertWithFfmpeg(request.ffmpegPath, target, finalTarget, audioOnly, stopToken, error)) {
+                    throw std::runtime_error(WideToUtf8(error.empty() ? L"FFmpeg failed" : error).c_str());
+                }
+                std::error_code ec;
+                std::filesystem::remove(target, ec);
+            }
+
+            outputFiles.push_back(finalTarget);
+        }
+
+        return {true, {}, outputFiles};
     } catch (const std::exception& ex) {
         return {false, Utf8ToWide(ex.what()), {}};
     }

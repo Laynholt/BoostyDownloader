@@ -25,6 +25,10 @@ std::filesystem::path AppPaths::logPath() const {
     return stuffDir() / L"boosty.log";
 }
 
+std::filesystem::path AppPaths::downloadQueuePath() const {
+    return stuffDir() / L"download_queue.json";
+}
+
 std::filesystem::path AppPaths::webViewDataDir() const {
     return stuffDir() / L"webview2";
 }

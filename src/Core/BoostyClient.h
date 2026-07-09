@@ -17,6 +17,8 @@ struct BoostyDownloadRequest {
     std::filesystem::path outputDirectory;
     BoostyAuth auth;
     std::wstring quality = L"highest";
+    std::wstring container = L"auto";
+    std::filesystem::path ffmpegPath;
 };
 
 struct BoostyProgress {
@@ -24,6 +26,11 @@ struct BoostyProgress {
     double percent = 0.0;
     std::uint64_t downloadedBytes = 0;
     std::uint64_t totalBytes = 0;
+    std::wstring qualityLabel;
+    std::wstring taskTitle;
+    std::wstring thumbnailUrl;
+    std::filesystem::path thumbnailPath;
+    std::filesystem::path outputPath;
 };
 
 struct BoostyDownloadResult {

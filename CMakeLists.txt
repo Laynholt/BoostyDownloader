@@ -58,8 +58,12 @@ add_executable(BoostyDownloader WIN32
     src/Core/Config.h
     src/Core/DownloadQueue.cpp
     src/Core/DownloadQueue.h
+    src/Core/DownloadQueueStore.cpp
+    src/Core/DownloadQueueStore.h
     src/Core/FileOperations.cpp
     src/Core/FileOperations.h
+    src/Core/FfmpegTools.cpp
+    src/Core/FfmpegTools.h
     src/Core/Logger.cpp
     src/Core/Logger.h
     src/Core/Text.cpp
@@ -68,6 +72,7 @@ add_executable(BoostyDownloader WIN32
     src/Platform/WinHttpClient.h
     src/UI/Application.cpp
     src/UI/Application.h
+    src/App/resources.rc
     src/UI/LoginDialog.h
     ${BOOSTY_WEBVIEW2_SOURCES}
     src/UI/UiRenderer.cpp
@@ -109,7 +114,17 @@ set_target_properties(BoostyDownloader PROPERTIES
 
 add_executable(BoostyDownloaderSelfTest
     tests/test_core.cpp
+    src/Core/AppPaths.cpp
+    src/Core/AppPaths.h
     src/Core/BoostyClient.h
+    src/Core/DownloadQueueStore.cpp
+    src/Core/DownloadQueueStore.h
+    src/Core/DownloadQueue.cpp
+    src/Core/DownloadQueue.h
+    src/Core/Logger.cpp
+    src/Core/Logger.h
+    src/Core/FfmpegTools.cpp
+    src/Core/FfmpegTools.h
     src/Core/FileOperations.cpp
     src/Core/FileOperations.h
     src/Core/Text.cpp

@@ -10,13 +10,13 @@
 
 namespace {
 
-std::wstring TimestampUtc() {
+std::wstring TimestampLocal() {
     const auto now = std::chrono::system_clock::now();
     const std::time_t time = std::chrono::system_clock::to_time_t(now);
-    std::tm utc = {};
-    gmtime_s(&utc, &time);
+    std::tm local = {};
+    localtime_s(&local, &time);
     std::wostringstream out;
-    out << std::put_time(&utc, L"%Y-%m-%dT%H:%M:%SZ");
+    out << std::put_time(&local, L"%Y-%m-%dT%H:%M:%S");
     return out.str();
 }
 
@@ -26,6 +26,7 @@ Logger::Logger(const AppPaths& paths)
     : m_path(paths.logPath()) {
     std::error_code ec;
     std::filesystem::create_directories(m_path.parent_path(), ec);
+    std::ofstream reset(m_path, std::ios::binary | std::ios::trunc);
 }
 
 void Logger::Info(const std::wstring& message) {
@@ -40,7 +41,7 @@ void Logger::Append(const std::wstring& level, const std::wstring& message) {
     std::lock_guard lock(m_mutex);
     std::ofstream out(m_path, std::ios::binary | std::ios::app);
     if (out) {
-        out << WideToUtf8(L"[" + TimestampUtc() + L"] [" + level + L"] " + message + L"\n");
+        out << WideToUtf8(L"[" + TimestampLocal() + L"] [" + level + L"] " + message + L"\n");
     }
 }
 

@@ -4,9 +4,12 @@
 
 #include "Config.h"
 #include "Text.h"
+#include "UiRenderer.h"
 
 #include <WebView2.h>
+#include <dwmapi.h>
 #include <nlohmann/json.hpp>
+#include <windowsx.h>
 #include <wrl.h>
 
 #include <string>
@@ -21,18 +24,98 @@ constexpr UINT kSaveToken = 1001;
 constexpr UINT kClose = 1002;
 constexpr UINT kAuthSaved = WM_APP + 1;
 
+struct LoginButton {
+    UINT id = 0;
+    RECT rect{};
+    std::wstring text;
+    bool primary = false;
+};
+
 struct LoginState {
     HINSTANCE instance = nullptr;
     AppPaths paths;
     BoostyAuth* auth = nullptr;
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> webview;
+    std::vector<LoginButton> buttons;
+    UINT hotButton = 0;
+    UINT pressedButton = 0;
     bool saved = false;
 
     LoginState(HINSTANCE instanceValue, const AppPaths& pathsValue, BoostyAuth* authValue)
         : instance(instanceValue), paths(pathsValue), auth(authValue) {
     }
 };
+
+void EnableDarkTitleBar(HWND window) {
+    BOOL enabled = TRUE;
+    constexpr DWORD kDwmUseImmersiveDarkMode = 20;
+    if (FAILED(DwmSetWindowAttribute(window, kDwmUseImmersiveDarkMode, &enabled, sizeof(enabled)))) {
+        constexpr DWORD kDwmUseImmersiveDarkModeBefore20H1 = 19;
+        DwmSetWindowAttribute(window, kDwmUseImmersiveDarkModeBefore20H1, &enabled, sizeof(enabled));
+    }
+}
+
+void DrawTextLine(HDC dc, const std::wstring& text, const RECT& rect, int size, COLORREF color, UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE) {
+    HFONT font = CreateFontW(-MulDiv(size, GetDeviceCaps(dc, LOGPIXELSY), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    RECT copy = rect;
+    DrawTextW(dc, text.c_str(), -1, &copy, format);
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
+LoginButton* HitButton(LoginState* state, POINT point) {
+    if (!state) {
+        return nullptr;
+    }
+    for (LoginButton& button : state->buttons) {
+        if (PtInRect(&button.rect, point)) {
+            return &button;
+        }
+    }
+    return nullptr;
+}
+
+void LayoutButtons(LoginState* state, const RECT& client) {
+    if (!state) {
+        return;
+    }
+    constexpr int top = 16;
+    constexpr int height = 38;
+    constexpr int gap = 14;
+    constexpr int rightInset = 20;
+    const int closeWidth = 112;
+    const int saveWidth = 220;
+    state->buttons = {
+        {kSaveToken, {client.right - rightInset - closeWidth - gap - saveWidth, top, client.right - rightInset - closeWidth - gap, top + height}, L"Сохранить токен", false},
+        {kClose, {client.right - rightInset - closeWidth, top, client.right - rightInset, top + height}, L"Закрыть", true}
+    };
+}
+
+void PaintLogin(HWND window, LoginState* state, HDC dc) {
+    RECT client{};
+    GetClientRect(window, &client);
+    LayoutButtons(state, client);
+    UiRenderer::DrawBackground(dc, client);
+    DrawTextLine(dc, L"Boosty авторизация", {20, 12, client.right - 380, 38}, 18, RGB(242, 242, 242));
+    DrawTextLine(dc, L"Войдите в Boosty, затем сохраните временный токен.", {20, 38, client.right - 380, 60}, 13, RGB(180, 180, 186));
+    if (state) {
+        for (const LoginButton& button : state->buttons) {
+            UiRenderer::DrawButton(
+                dc,
+                button.rect,
+                button.text.c_str(),
+                button.primary,
+                state->pressedButton == button.id,
+                state->hotButton == button.id,
+                false
+            );
+        }
+    }
+}
 
 std::wstring CookieValue(ICoreWebView2Cookie* cookie, bool name) {
     LPWSTR raw = nullptr;
@@ -50,7 +133,10 @@ void ResizeWebView(HWND window, LoginState* state) {
     }
     RECT rect = {};
     GetClientRect(window, &rect);
-    rect.top = 46;
+    rect.left = 16;
+    rect.top = 72;
+    rect.right -= 16;
+    rect.bottom -= 16;
     state->controller->put_Bounds(rect);
 }
 
@@ -150,8 +236,7 @@ LRESULT CALLBACK LoginProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
         state = reinterpret_cast<LoginState*>(create->lpCreateParams);
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        CreateWindowW(L"BUTTON", L"Сохранить временный токен", WS_CHILD | WS_VISIBLE, 10, 8, 210, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSaveToken)), state->instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Закрыть", WS_CHILD | WS_VISIBLE, 230, 8, 90, 30, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kClose)), state->instance, nullptr);
+        EnableDarkTitleBar(window);
         CreateCoreWebView2EnvironmentWithOptions(
             nullptr,
             state->paths.webViewDataDir().c_str(),
@@ -186,7 +271,74 @@ LRESULT CALLBACK LoginProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
     }
     case WM_SIZE:
         ResizeWebView(window, state);
+        InvalidateRect(window, nullptr, FALSE);
         return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEMOVE: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const LoginButton* hit = HitButton(state, point);
+        const UINT hotButton = hit ? hit->id : 0;
+        if (state && state->hotButton != hotButton) {
+            state->hotButton = hotButton;
+            InvalidateRect(window, nullptr, FALSE);
+            TRACKMOUSEEVENT event{sizeof(event), TME_LEAVE, window, 0};
+            TrackMouseEvent(&event);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (state) {
+            state->hotButton = 0;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (LoginButton* hit = HitButton(state, point)) {
+            state->pressedButton = hit->id;
+            SetCapture(window);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        break;
+    }
+    case WM_LBUTTONUP: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const UINT pressed = state ? state->pressedButton : 0;
+        if (state) {
+            state->pressedButton = 0;
+        }
+        ReleaseCapture();
+        InvalidateRect(window, nullptr, FALSE);
+        if (pressed != 0) {
+            if (LoginButton* hit = HitButton(state, point); hit && hit->id == pressed) {
+                if (pressed == kSaveToken) {
+                    SaveAuth(window, state);
+                } else if (pressed == kClose) {
+                    DestroyWindow(window);
+                }
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(window, &ps);
+        RECT client{};
+        GetClientRect(window, &client);
+        HDC memoryDc = CreateCompatibleDC(dc);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right - client.left, client.bottom - client.top);
+        HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+        PaintLogin(window, state, memoryDc);
+        BitBlt(dc, 0, 0, client.right - client.left, client.bottom - client.top, memoryDc, 0, 0, SRCCOPY);
+        SelectObject(memoryDc, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(memoryDc);
+        EndPaint(window, &ps);
+        return 0;
+    }
     case WM_COMMAND:
         if (LOWORD(wParam) == kSaveToken) {
             SaveAuth(window, state);

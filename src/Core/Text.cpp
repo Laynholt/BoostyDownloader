@@ -36,17 +36,39 @@ std::wstring Trim(std::wstring value) {
     return value;
 }
 
-std::vector<std::wstring> SplitLines(const std::wstring& text) {
+std::vector<std::wstring> ExtractUrls(const std::wstring& text) {
     std::vector<std::wstring> result;
     std::wstringstream input(text);
     std::wstring line;
     while (std::getline(input, line)) {
         line = Trim(line);
-        if (!line.empty()) {
+        if (!line.empty() && line.front() == L'[') {
+            line.erase(line.begin());
+            line = Trim(line);
+        }
+        if (!line.empty() && line.back() == L']') {
+            line.pop_back();
+            line = Trim(line);
+        }
+        if (!line.empty() && line.back() == L',') {
+            line.pop_back();
+            line = Trim(line);
+        }
+        if (line.size() >= 2 &&
+            ((line.front() == L'"' && line.back() == L'"') ||
+             (line.front() == L'\'' && line.back() == L'\''))) {
+            line = line.substr(1, line.size() - 2);
+            line = Trim(line);
+        }
+        if (!line.empty() && line.find(L"://") != std::wstring::npos) {
             result.push_back(line);
         }
     }
     return result;
+}
+
+std::vector<std::wstring> SplitLines(const std::wstring& text) {
+    return ExtractUrls(text);
 }
 
 std::wstring UrlDecode(const std::wstring& value) {

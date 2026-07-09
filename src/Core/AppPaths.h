@@ -10,6 +10,7 @@ public:
     std::filesystem::path stuffDir() const;
     std::filesystem::path configPath() const;
     std::filesystem::path logPath() const;
+    std::filesystem::path downloadQueuePath() const;
     std::filesystem::path webViewDataDir() const;
 
 private:

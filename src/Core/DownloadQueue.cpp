@@ -1,9 +1,112 @@
 #include "DownloadQueue.h"
 
-#include <algorithm>
+#include "Logger.h"
 
-DownloadQueue::DownloadQueue(int maxParallelDownloads)
+#include <algorithm>
+#include <filesystem>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+namespace {
+
+std::wstring FormatEta(std::uint64_t seconds) {
+    const std::uint64_t hours = seconds / 3600;
+    const std::uint64_t minutes = (seconds % 3600) / 60;
+    seconds %= 60;
+    wchar_t buffer[32] = {};
+    if (hours > 0) {
+        swprintf_s(buffer, L"%llu:%02llu:%02llu", hours, minutes, seconds);
+    } else {
+        swprintf_s(buffer, L"%llu:%02llu", minutes, seconds);
+    }
+    return buffer;
+}
+
+void AddUniquePath(std::vector<std::filesystem::path>& paths, const std::filesystem::path& path) {
+    if (path.empty()) {
+        return;
+    }
+    if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
+        paths.push_back(path);
+    }
+}
+
+void RemovePartialFilesFor(const std::filesystem::path& path) {
+    if (path.empty()) {
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    ec.clear();
+    std::filesystem::remove(path.wstring() + L".download", ec);
+}
+
+void RemoveInvalidTaskFiles(const DownloadTaskSnapshot& task) {
+    for (const std::filesystem::path& path : task.outputFiles) {
+        RemovePartialFilesFor(path);
+    }
+    if (!task.thumbnailPath.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(task.thumbnailPath, ec);
+        ec.clear();
+        std::filesystem::remove(task.thumbnailPath.wstring() + L".download", ec);
+    }
+}
+
+bool IsPersistedRunningState(DownloadTaskState state) {
+    return state == DownloadTaskState::Queued ||
+        state == DownloadTaskState::Preparing ||
+        state == DownloadTaskState::Downloading;
+}
+
+DownloadTaskSnapshot SnapshotForShutdown(DownloadTaskSnapshot task) {
+    if (IsPersistedRunningState(task.state)) {
+        task.state = DownloadTaskState::Canceled;
+        task.statusText = L"Отменено";
+        task.etaText.clear();
+    }
+    return task;
+}
+
+DownloadTaskSnapshot NormalizeRestoredSnapshot(DownloadTaskSnapshot task) {
+    if (IsPersistedRunningState(task.state)) {
+        task.state = DownloadTaskState::Canceled;
+        task.statusText = L"Отменено";
+        task.etaText.clear();
+    }
+    if (task.title.empty()) {
+        task.title = task.request.url;
+    }
+    if (task.statusText.empty()) {
+        switch (task.state) {
+        case DownloadTaskState::Queued:
+            task.statusText = L"В очереди";
+            break;
+        case DownloadTaskState::Completed:
+            task.statusText = L"Готово";
+            break;
+        case DownloadTaskState::Failed:
+            task.statusText = L"Ошибка";
+            break;
+        case DownloadTaskState::Canceled:
+            task.statusText = L"Отменено";
+            break;
+        case DownloadTaskState::Preparing:
+        case DownloadTaskState::Downloading:
+            task.statusText = L"Отменено";
+            break;
+        }
+    }
+    return task;
+}
+
+} // namespace
+
+DownloadQueue::DownloadQueue(int maxParallelDownloads, Logger* logger)
     : m_maxParallelDownloads(std::max(1, maxParallelDownloads)),
+      m_logger(logger),
       m_scheduler(&DownloadQueue::SchedulerLoop, this) {
 }
 
@@ -30,6 +133,9 @@ int DownloadQueue::Enqueue(const BoostyDownloadRequest& request, std::wstring ti
     m_tasks[id] = std::move(record);
     ++m_revision;
     m_cv.notify_all();
+    if (m_logger) {
+        m_logger->Info(L"Task #" + std::to_wstring(id) + L" queued: " + request.url);
+    }
     return id;
 }
 
@@ -39,6 +145,9 @@ void DownloadQueue::SetMaxParallelDownloads(int value) {
         m_maxParallelDownloads = std::clamp(value, 1, 16);
     }
     m_cv.notify_all();
+    if (m_logger) {
+        m_logger->Info(L"Parallel downloads set to " + std::to_wstring(std::clamp(value, 1, 16)));
+    }
 }
 
 bool DownloadQueue::Cancel(int id) {
@@ -68,11 +177,29 @@ bool DownloadQueue::Retry(int id) {
     it->second.snapshot.state = DownloadTaskState::Queued;
     it->second.snapshot.statusText = L"В очереди";
     it->second.snapshot.errorText.clear();
+    it->second.snapshot.etaText.clear();
     it->second.snapshot.percent = 0;
     it->second.snapshot.downloadedBytes = 0;
     it->second.snapshot.totalBytes = 0;
+    it->second.progressStartedTick = 0;
+    it->second.lastDownloadedBytes = 0;
     ++m_revision;
     m_cv.notify_all();
+    return true;
+}
+
+bool DownloadQueue::Remove(int id) {
+    std::lock_guard lock(m_mutex);
+    const auto it = m_tasks.find(id);
+    if (it == m_tasks.end() || it->second.active) {
+        return false;
+    }
+    const DownloadTaskState state = it->second.snapshot.state;
+    if (state == DownloadTaskState::Canceled || state == DownloadTaskState::Failed) {
+        RemoveInvalidTaskFiles(it->second.snapshot);
+    }
+    m_tasks.erase(it);
+    ++m_revision;
     return true;
 }
 
@@ -84,6 +211,26 @@ void DownloadQueue::ClearFinished() {
             (it->second.snapshot.state == DownloadTaskState::Completed ||
              it->second.snapshot.state == DownloadTaskState::Failed ||
              it->second.snapshot.state == DownloadTaskState::Canceled)) {
+            const DownloadTaskState state = it->second.snapshot.state;
+            if (state == DownloadTaskState::Failed || state == DownloadTaskState::Canceled) {
+                RemoveInvalidTaskFiles(it->second.snapshot);
+            }
+            it = m_tasks.erase(it);
+            changed = true;
+        } else {
+            ++it;
+        }
+    }
+    if (changed) {
+        ++m_revision;
+    }
+}
+
+void DownloadQueue::ClearInactive() {
+    std::lock_guard lock(m_mutex);
+    bool changed = false;
+    for (auto it = m_tasks.begin(); it != m_tasks.end();) {
+        if (!it->second.active && it->second.snapshot.state == DownloadTaskState::Queued) {
             it = m_tasks.erase(it);
             changed = true;
         } else {
@@ -101,6 +248,52 @@ std::vector<DownloadTaskSnapshot> DownloadQueue::Snapshot() const {
     for (const auto& [id, task] : m_tasks) {
         (void)id;
         result.push_back(task.snapshot);
+    }
+    return result;
+}
+
+void DownloadQueue::ImportSnapshots(const std::vector<DownloadTaskSnapshot>& tasks) {
+    std::lock_guard lock(m_mutex);
+    if (m_activeCount > 0 || !m_workers.empty()) {
+        return;
+    }
+
+    m_tasks.clear();
+    m_nextId = 1;
+    for (DownloadTaskSnapshot task : tasks) {
+        if (task.id <= 0 || task.request.url.empty()) {
+            continue;
+        }
+        TaskRecord record;
+        record.snapshot = NormalizeRestoredSnapshot(std::move(task));
+        record.active = false;
+        m_nextId = std::max(m_nextId, record.snapshot.id + 1);
+        m_tasks[record.snapshot.id] = std::move(record);
+    }
+    ++m_revision;
+    m_cv.notify_all();
+}
+
+std::vector<DownloadTaskSnapshot> DownloadQueue::ExportSnapshots() const {
+    std::lock_guard lock(m_mutex);
+    std::vector<DownloadTaskSnapshot> result;
+    for (const auto& [id, task] : m_tasks) {
+        (void)id;
+        if (task.snapshot.state != DownloadTaskState::Completed) {
+            result.push_back(task.snapshot);
+        }
+    }
+    return result;
+}
+
+std::vector<DownloadTaskSnapshot> DownloadQueue::ExportSnapshotsForShutdown() const {
+    std::lock_guard lock(m_mutex);
+    std::vector<DownloadTaskSnapshot> result;
+    for (const auto& [id, task] : m_tasks) {
+        (void)id;
+        if (task.snapshot.state != DownloadTaskState::Completed) {
+            result.push_back(SnapshotForShutdown(task.snapshot));
+        }
     }
     return result;
 }
@@ -182,6 +375,9 @@ void DownloadQueue::StartTask(int id, std::stop_token stopToken) {
         task = it->second.snapshot;
     }
 
+    if (m_logger) {
+        m_logger->Info(L"Task #" + std::to_wstring(id) + L" started: " + task.request.url);
+    }
     const BoostyDownloadResult result = DownloadBoostyVideo(
         task.request,
         stopToken,
@@ -192,10 +388,37 @@ void DownloadQueue::StartTask(int id, std::stop_token stopToken) {
                 return;
             }
             it->second.snapshot.state = DownloadTaskState::Downloading;
+            if (!progress.taskTitle.empty()) {
+                it->second.snapshot.title = progress.taskTitle;
+            }
+            if (!progress.thumbnailUrl.empty()) {
+                it->second.snapshot.thumbnailUrl = progress.thumbnailUrl;
+            }
+            if (!progress.thumbnailPath.empty()) {
+                it->second.snapshot.thumbnailPath = progress.thumbnailPath;
+            }
+            if (!progress.qualityLabel.empty()) {
+                it->second.snapshot.qualityLabel = progress.qualityLabel;
+            }
+            AddUniquePath(it->second.snapshot.outputFiles, progress.outputPath);
             it->second.snapshot.statusText = progress.stage;
             it->second.snapshot.percent = std::clamp(progress.percent, 0.0, 100.0);
             it->second.snapshot.downloadedBytes = progress.downloadedBytes;
             it->second.snapshot.totalBytes = progress.totalBytes;
+            if (progress.downloadedBytes == 0 || progress.downloadedBytes < it->second.lastDownloadedBytes) {
+                it->second.progressStartedTick = GetTickCount64();
+                it->second.snapshot.etaText.clear();
+            } else if (progress.totalBytes > progress.downloadedBytes && progress.downloadedBytes > 0 && it->second.progressStartedTick > 0) {
+                const std::uint64_t elapsedMs = std::max<std::uint64_t>(1, GetTickCount64() - it->second.progressStartedTick);
+                const double bytesPerSecond = static_cast<double>(progress.downloadedBytes) * 1000.0 / static_cast<double>(elapsedMs);
+                if (bytesPerSecond > 0.0) {
+                    const auto remaining = static_cast<std::uint64_t>((static_cast<double>(progress.totalBytes - progress.downloadedBytes) / bytesPerSecond) + 0.5);
+                    it->second.snapshot.etaText = FormatEta(remaining);
+                }
+            } else if (progress.totalBytes > 0 && progress.downloadedBytes >= progress.totalBytes) {
+                it->second.snapshot.etaText = L"0:00";
+            }
+            it->second.lastDownloadedBytes = progress.downloadedBytes;
             ++m_revision;
         }
     );
@@ -211,18 +434,32 @@ void DownloadQueue::FinishTask(int id, std::stop_token stopToken, const BoostyDo
     }
     it->second.active = false;
     --m_activeCount;
-    it->second.snapshot.outputFiles = result.outputFiles;
+    if (!result.outputFiles.empty()) {
+        it->second.snapshot.outputFiles = result.outputFiles;
+    }
     if (stopToken.stop_requested()) {
         it->second.snapshot.state = DownloadTaskState::Canceled;
         it->second.snapshot.statusText = L"Отменено";
+        it->second.snapshot.etaText.clear();
+        if (m_logger) {
+            m_logger->Info(L"Task #" + std::to_wstring(id) + L" canceled");
+        }
     } else if (result.success) {
         it->second.snapshot.state = DownloadTaskState::Completed;
         it->second.snapshot.statusText = L"Готово";
+        it->second.snapshot.etaText.clear();
         it->second.snapshot.percent = 100.0;
+        if (m_logger) {
+            m_logger->Info(L"Task #" + std::to_wstring(id) + L" completed");
+        }
     } else {
         it->second.snapshot.state = DownloadTaskState::Failed;
         it->second.snapshot.statusText = L"Ошибка";
         it->second.snapshot.errorText = result.errorText;
+        it->second.snapshot.etaText.clear();
+        if (m_logger) {
+            m_logger->Error(L"Task #" + std::to_wstring(id) + L" failed: " + result.errorText);
+        }
     }
     ++m_revision;
     m_finishedWorkerIds.push_back(id);
