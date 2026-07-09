@@ -5,10 +5,10 @@
 #include "Config.h"
 #include "MessageDialog.h"
 #include "Text.h"
+#include "UiHelpers.h"
 #include "UiRenderer.h"
 
 #include <WebView2.h>
-#include <dwmapi.h>
 #include <nlohmann/json.hpp>
 #include <windowsx.h>
 #include <wrl.h>
@@ -47,15 +47,6 @@ struct LoginState {
         : instance(instanceValue), paths(pathsValue), auth(authValue) {
     }
 };
-
-void EnableDarkTitleBar(HWND window) {
-    BOOL enabled = TRUE;
-    constexpr DWORD kDwmUseImmersiveDarkMode = 20;
-    if (FAILED(DwmSetWindowAttribute(window, kDwmUseImmersiveDarkMode, &enabled, sizeof(enabled)))) {
-        constexpr DWORD kDwmUseImmersiveDarkModeBefore20H1 = 19;
-        DwmSetWindowAttribute(window, kDwmUseImmersiveDarkModeBefore20H1, &enabled, sizeof(enabled));
-    }
-}
 
 void DrawTextLine(HDC dc, const std::wstring& text, const RECT& rect, int size, COLORREF color, UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE) {
     HFONT font = CreateFontW(-MulDiv(size, GetDeviceCaps(dc, LOGPIXELSY), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");

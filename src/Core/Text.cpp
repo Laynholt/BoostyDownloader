@@ -67,10 +67,6 @@ std::vector<std::wstring> ExtractUrls(const std::wstring& text) {
     return result;
 }
 
-std::vector<std::wstring> SplitLines(const std::wstring& text) {
-    return ExtractUrls(text);
-}
-
 std::wstring UrlDecode(const std::wstring& value) {
     std::wstring out;
     for (size_t i = 0; i < value.size(); ++i) {

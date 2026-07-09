@@ -2,16 +2,15 @@
 
 #include "AppPaths.h"
 #include "Text.h"
+#include "UiHelpers.h"
 #include "UiRenderer.h"
 
 #include <commctrl.h>
-#include <dwmapi.h>
 #include <gdiplus.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -43,23 +42,6 @@ struct DialogState {
     int dragStartY = 0;
     int dragStartScrollY = 0;
 };
-
-void EnableDarkTitleBar(HWND window) {
-    BOOL enabled = TRUE;
-    constexpr DWORD kDwmUseImmersiveDarkMode = 20;
-    if (FAILED(DwmSetWindowAttribute(window, kDwmUseImmersiveDarkMode, &enabled, sizeof(enabled)))) {
-        constexpr DWORD kDwmUseImmersiveDarkModeBefore20H1 = 19;
-        DwmSetWindowAttribute(window, kDwmUseImmersiveDarkModeBefore20H1, &enabled, sizeof(enabled));
-    }
-}
-
-HFONT CreateUiFont(int height, int weight = FW_NORMAL) {
-    LOGFONTW font = {};
-    font.lfHeight = height;
-    font.lfWeight = weight;
-    wcscpy_s(font.lfFaceName, L"Segoe UI");
-    return CreateFontIndirectW(&font);
-}
 
 void DrawTextLine(HDC dc, const std::wstring& text, RECT rect, int size, COLORREF color, UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE) {
     HFONT font = CreateUiFont(-size);
@@ -136,28 +118,6 @@ DialogButton* HitButton(DialogState* state, POINT point) {
         }
     }
     return nullptr;
-}
-
-void CopyTextToClipboard(HWND owner, const std::wstring& text) {
-    if (!OpenClipboard(owner)) {
-        return;
-    }
-    EmptyClipboard();
-    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (data) {
-        void* target = GlobalLock(data);
-        if (target) {
-            std::memcpy(target, text.c_str(), bytes);
-            GlobalUnlock(data);
-            SetClipboardData(CF_UNICODETEXT, data);
-            data = nullptr;
-        }
-        if (data) {
-            GlobalFree(data);
-        }
-    }
-    CloseClipboard();
 }
 
 RECT MessageTextRect(const RECT& client) {

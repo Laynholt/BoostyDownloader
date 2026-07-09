@@ -88,6 +88,8 @@ add_executable(BoostyDownloader WIN32
     ${BOOSTY_WEBVIEW2_SOURCES}
     src/UI/MessageDialog.cpp
     src/UI/MessageDialog.h
+    src/UI/UiHelpers.cpp
+    src/UI/UiHelpers.h
     src/UI/UiRenderer.cpp
     src/UI/UiRenderer.h
 )

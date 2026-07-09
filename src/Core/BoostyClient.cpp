@@ -341,6 +341,15 @@ std::wstring ExtractAccessTokenFromText(const std::wstring& text) {
     return {};
 }
 
+bool IsBoostyPostUrl(const std::wstring& url) {
+    try {
+        ParseBoostyPostUrl(url);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 BoostyDownloadResult DownloadBoostyVideo(
     const BoostyDownloadRequest& request,
     std::stop_token stopToken,

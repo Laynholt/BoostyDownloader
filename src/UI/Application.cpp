@@ -8,18 +8,17 @@
 #include "MessageDialog.h"
 #include "TaskFormatting.h"
 #include "Text.h"
+#include "UiHelpers.h"
 #include "UiRenderer.h"
 
 #include <commdlg.h>
 #include <commctrl.h>
-#include <dwmapi.h>
 #include <gdiplus.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <windowsx.h>
 
 #include <algorithm>
-#include <cstring>
 #include <fstream>
 #include <functional>
 #include <sstream>
@@ -42,6 +41,11 @@ constexpr UINT kTaskRetry = 202;
 constexpr UINT kTaskDelete = 203;
 constexpr UINT kTaskClose = 204;
 constexpr int kAppIcon = 1;
+constexpr int kQueueHeaderTop = 264;
+constexpr int kQueuePanelTop = 312;
+constexpr int kQueuePanelBottomInset = 44;
+constexpr int kQueuePanelTopPadding = 12;
+constexpr int kQueuePanelBottomPadding = 12;
 constexpr int kQueueRowHeight = 92;
 constexpr int kQueueRowGap = 10;
 constexpr const wchar_t* kEditContextMenuClassName = L"BoostyEditContextMenu";
@@ -88,37 +92,6 @@ void SetFont(HWND window) {
     SendMessageW(window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
-void CopyTextToClipboard(HWND owner, const std::wstring& text) {
-    if (!OpenClipboard(owner)) {
-        return;
-    }
-    EmptyClipboard();
-    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (data) {
-        void* target = GlobalLock(data);
-        if (target) {
-            memcpy(target, text.c_str(), bytes);
-            GlobalUnlock(data);
-            SetClipboardData(CF_UNICODETEXT, data);
-            data = nullptr;
-        }
-        if (data) {
-            GlobalFree(data);
-        }
-    }
-    CloseClipboard();
-}
-
-void EnableDarkTitleBar(HWND window) {
-    BOOL enabled = TRUE;
-    constexpr DWORD kDwmUseImmersiveDarkMode = 20;
-    if (FAILED(DwmSetWindowAttribute(window, kDwmUseImmersiveDarkMode, &enabled, sizeof(enabled)))) {
-        constexpr DWORD kDwmUseImmersiveDarkModeBefore20H1 = 19;
-        DwmSetWindowAttribute(window, kDwmUseImmersiveDarkModeBefore20H1, &enabled, sizeof(enabled));
-    }
-}
-
 UINT TooltipInfoSize() {
 #ifdef TTTOOLINFOW_V2_SIZE
     return TTTOOLINFOW_V2_SIZE;
@@ -139,32 +112,17 @@ std::wstring StateText(DownloadTaskState state) {
     return {};
 }
 
-bool IsBoostyPostUrl(const std::wstring& url) {
-    const std::wstring marker = L"boosty.to/";
-    const size_t host = url.find(marker);
-    if (host == std::wstring::npos) {
-        return false;
-    }
-    const size_t authorStart = host + marker.size();
-    const size_t posts = url.find(L"/posts/", authorStart);
-    if (posts == std::wstring::npos || posts == authorStart) {
-        return false;
-    }
-    const size_t idStart = posts + 7;
-    return idStart < url.size() && url.find_first_of(L"?#/", idStart) > idStart;
-}
-
 RECT QueuePanelRectForClient(const RECT& client) {
-    return {20, 332, client.right - 20, client.bottom - 50};
+    return {20, kQueuePanelTop, client.right - 20, client.bottom - kQueuePanelBottomInset};
 }
 
 RECT QueueRowRectAt(const RECT& queuePanel, int visibleIndex) {
-    const int y = queuePanel.top + 18 + (visibleIndex * (kQueueRowHeight + kQueueRowGap));
+    const int y = queuePanel.top + kQueuePanelTopPadding + (visibleIndex * (kQueueRowHeight + kQueueRowGap));
     return {queuePanel.left + 14, y, queuePanel.right - 32, y + kQueueRowHeight};
 }
 
 int QueueVisibleRowCount(const RECT& queuePanel) {
-    const int availableHeight = std::max(0, static_cast<int>(queuePanel.bottom - 16 - (queuePanel.top + 18)));
+    const int availableHeight = std::max(0, static_cast<int>(queuePanel.bottom - kQueuePanelBottomPadding - (queuePanel.top + kQueuePanelTopPadding)));
     return std::max(1, (availableHeight + kQueueRowGap) / (kQueueRowHeight + kQueueRowGap));
 }
 
@@ -173,7 +131,7 @@ int QueueMaxScrollOffset(const RECT& queuePanel, size_t taskCount) {
 }
 
 RECT QueueScrollbarTrackRect(const RECT& queuePanel) {
-    return {queuePanel.right - 20, queuePanel.top + 18, queuePanel.right - 12, queuePanel.bottom - 16};
+    return {queuePanel.right - 20, queuePanel.top + kQueuePanelTopPadding, queuePanel.right - 12, queuePanel.bottom - kQueuePanelBottomPadding};
 }
 
 RECT QueueScrollbarThumbRect(const RECT& queuePanel, size_t taskCount, int scrollOffset) {
@@ -217,14 +175,6 @@ void DrawTextLine(HDC dc, const std::wstring& text, RECT rect, int size, COLORRE
     DrawTextW(dc, text.c_str(), -1, &rect, format);
     SelectObject(dc, old);
     DeleteObject(font);
-}
-
-HFONT CreateUiFont(int height = -16, int weight = FW_NORMAL) {
-    LOGFONTW font = {};
-    font.lfHeight = height;
-    font.lfWeight = weight;
-    wcscpy_s(font.lfFaceName, L"Segoe UI");
-    return CreateFontIndirectW(&font);
 }
 
 void DrawTextBlock(HDC dc, const std::wstring& text, RECT rect, COLORREF color, HFONT font, UINT format) {
@@ -529,6 +479,8 @@ constexpr UINT kDialogChoose = 302;
 constexpr UINT kDialogClose = 303;
 constexpr UINT kDialogDone = WM_APP + 30;
 constexpr UINT kUpdateFoundMessage = WM_APP + 80;
+constexpr int kFfmpegDialogWidth = 600;
+constexpr int kFfmpegDialogHeight = 370;
 constexpr const wchar_t* kLogViewClassName = L"BoostyLogView";
 constexpr const wchar_t* kLogCopyMenuClassName = L"BoostyLogCopyMenu";
 constexpr int kScrollTextTopPadding = 12;
@@ -794,9 +746,9 @@ void LayoutFfmpegDialog(FfmpegDialogState* state, const RECT& client) {
     }
     const int bottom = client.bottom - 30;
     if (state->config) {
-        constexpr int left = 36;
-        constexpr int width = 190;
-        constexpr int gap = 18;
+        constexpr int left = 28;
+        constexpr int width = 170;
+        constexpr int gap = 14;
         state->buttons = {
             {kDialogInstall, {left, bottom - 42, left + width, bottom}, L"Установить", true, !state->installing, true},
             {kDialogChoose, {left + width + gap, bottom - 42, left + (width * 2) + gap, bottom}, L"Выбрать папку", false, !state->installing, true},
@@ -958,6 +910,18 @@ LRESULT CALLBACK FfmpegDialogProc(HWND window, UINT message, WPARAM wParam, LPAR
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
+void RestoreModalOwner(HWND owner) {
+    if (!owner) {
+        return;
+    }
+    EnableWindow(owner, TRUE);
+    ShowWindow(owner, IsIconic(owner) ? SW_RESTORE : SW_SHOW);
+    SetWindowPos(owner, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    SetForegroundWindow(owner);
+    SetActiveWindow(owner);
+    SetFocus(owner);
+}
+
 bool ShowFfmpegModal(HWND owner, HINSTANCE instance, const AppPaths& paths, AppConfig& config) {
     WNDCLASSW wc = {};
     wc.lpfnWndProc = FfmpegDialogProc;
@@ -972,8 +936,8 @@ bool ShowFfmpegModal(HWND owner, HINSTANCE instance, const AppPaths& paths, AppC
     state.paths = &paths;
     RECT ownerRect{};
     GetWindowRect(owner, &ownerRect);
-    const int width = 740;
-    const int height = 430;
+    const int width = kFfmpegDialogWidth;
+    const int height = kFfmpegDialogHeight;
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"FFmpeg", WS_POPUP | WS_CAPTION | WS_SYSMENU, ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2, ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2, width, height, owner, nullptr, instance, &state);
     if (!dialog) {
         return false;
@@ -987,8 +951,7 @@ bool ShowFfmpegModal(HWND owner, HINSTANCE instance, const AppPaths& paths, AppC
             DispatchMessageW(&msg);
         }
     }
-    EnableWindow(owner, TRUE);
-    SetActiveWindow(owner);
+    RestoreModalOwner(owner);
     return state.saved;
 }
 
@@ -1006,8 +969,8 @@ void ShowFfmpegInfoModal(HWND owner, HINSTANCE instance, const std::wstring& tit
     state.message = message;
     RECT ownerRect{};
     GetWindowRect(owner, &ownerRect);
-    const int width = 720;
-    const int height = 380;
+    const int width = kFfmpegDialogWidth;
+    const int height = kFfmpegDialogHeight;
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"FFmpeg", WS_POPUP | WS_CAPTION | WS_SYSMENU, ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2, ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2, width, height, owner, nullptr, instance, &state);
     if (!dialog) {
         return;
@@ -1021,8 +984,7 @@ void ShowFfmpegInfoModal(HWND owner, HINSTANCE instance, const std::wstring& tit
             DispatchMessageW(&msg);
         }
     }
-    EnableWindow(owner, TRUE);
-    SetActiveWindow(owner);
+    RestoreModalOwner(owner);
 }
 
 std::wstring QualityFromButton(UINT id) {
@@ -2663,10 +2625,10 @@ void Application::AddButtons() {
         {kBtnDownload, {margin, 220, margin + 120, 256}, L"Скачать", true},
         {kBtnLogin, {margin + 132, 220, margin + 322, 256}, L"Получить токен", false},
         {kBtnSettings, {right - 150, 220, right, 256}, L"Настройки", false},
-        {kBtnOpenFolder, {right - 540, 284, right - 390, 320}, L"Открыть папку", false},
-        {kBtnLogs, {right - 378, 284, right - 288, 320}, L"Логи", false},
-        {kBtnClear, {right - 276, 284, right - 58, 320}, L"Очистить очередь", false},
-        {kBtnClearFinished, {right - 46, 284, right, 320}, L"X", false}
+        {kBtnOpenFolder, {right - 540, kQueueHeaderTop, right - 390, kQueueHeaderTop + 36}, L"Открыть папку", false},
+        {kBtnLogs, {right - 378, kQueueHeaderTop, right - 288, kQueueHeaderTop + 36}, L"Логи", false},
+        {kBtnClear, {right - 276, kQueueHeaderTop, right - 58, kQueueHeaderTop + 36}, L"Очистить очередь", false},
+        {kBtnClearFinished, {right - 46, kQueueHeaderTop, right, kQueueHeaderTop + 36}, L"X", false}
     };
 }
 
@@ -2727,7 +2689,7 @@ void Application::Paint(HDC dc) {
         );
     }
 
-    DrawTextLine(dc, L"Очередь загрузок", {28, 284, client.right - 28, 316}, 20, RGB(242, 242, 242));
+    DrawTextLine(dc, L"Очередь загрузок", {28, kQueueHeaderTop, client.right - 28, kQueueHeaderTop + 32}, 20, RGB(242, 242, 242));
     RECT queuePanel = QueuePanelRectForClient(client);
     UiRenderer::DrawPanel(dc, queuePanel);
 
@@ -2795,7 +2757,7 @@ void Application::Paint(HDC dc) {
                 button.primary,
                 m_pressedTaskId == button.taskId && m_pressedTaskAction == button.action,
                 m_hotTaskId == button.taskId && m_hotTaskAction == button.action,
-                false
+                true
             );
         }
         UiRenderer::DrawProgressBar(dc, {textLeft, row.bottom - 12, row.right - 14, row.bottom - 6}, task.percent);
@@ -2928,7 +2890,7 @@ void Application::ClickTask(int taskId, UINT action) {
 
 void Application::EnqueueText(const std::wstring& text) {
     SaveConfigFromControls();
-    const auto urls = SplitLines(text);
+    const auto urls = ExtractUrls(text);
     if (urls.empty()) {
         SetStatus(L"Нет ссылок");
         if (m_logger) {

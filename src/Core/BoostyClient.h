@@ -45,6 +45,7 @@ using BoostyProgressCallback = std::function<void(const BoostyProgress&)>;
 
 std::wstring ExtractAccessTokenFromCookie(const std::wstring& cookieHeader);
 std::wstring ExtractAccessTokenFromText(const std::wstring& text);
+bool IsBoostyPostUrl(const std::wstring& url);
 BoostyDownloadResult DownloadBoostyVideo(
     const BoostyDownloadRequest& request,
     std::stop_token stopToken,
