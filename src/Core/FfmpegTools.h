@@ -17,6 +17,14 @@ struct FfmpegStatus {
 FfmpegStatus ResolveFfmpeg(const AppPaths& paths, const std::filesystem::path& configuredPath);
 std::wstring FfmpegVersion(const std::filesystem::path& ffmpegExe);
 bool InstallFfmpeg(const AppPaths& paths, std::wstring& errorText);
+using FfmpegInstallProgressCallback = std::function<void(std::uint64_t downloaded, std::uint64_t total, const std::wstring& status)>;
+using FfmpegInstallCancelCallback = std::function<bool()>;
+bool InstallFfmpeg(
+    const AppPaths& paths,
+    std::wstring& errorText,
+    const FfmpegInstallProgressCallback& onProgress,
+    const FfmpegInstallCancelCallback& isCanceled
+);
 
 struct FfmpegProgress {
     double percent = 0.0;

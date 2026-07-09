@@ -1,5 +1,8 @@
 #include "FfmpegTools.h"
 
+#include "Text.h"
+#include "WinHttpClient.h"
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -9,12 +12,17 @@
 #include <array>
 #include <cwctype>
 #include <fstream>
+#include <stdexcept>
 #include <sstream>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 namespace {
 
 std::wstring Quote(const std::filesystem::path& path);
+
+constexpr const wchar_t* kFfmpegDownloadUrl = L"https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
 
 bool IsFfmpegExe(const std::filesystem::path& path) {
     return !path.empty() && std::filesystem::is_regular_file(path);
@@ -52,6 +60,124 @@ std::filesystem::path SearchPathFfmpeg() {
     }
     buffer.resize(size);
     return IsFfmpegExe(buffer) ? std::filesystem::path(buffer) : std::filesystem::path{};
+}
+
+class CleanupPaths {
+public:
+    explicit CleanupPaths(std::initializer_list<std::filesystem::path> paths)
+        : m_paths(paths) {
+    }
+
+    ~CleanupPaths() {
+        std::error_code ec;
+        for (const std::filesystem::path& path : m_paths) {
+            std::filesystem::remove_all(path, ec);
+            ec.clear();
+        }
+    }
+
+private:
+    std::vector<std::filesystem::path> m_paths;
+};
+
+std::wstring QuotePowerShellLiteral(const std::filesystem::path& path) {
+    std::wstring value = path.wstring();
+    std::wstring escaped;
+    escaped.reserve(value.size() + 8);
+    escaped.push_back(L'\'');
+    for (wchar_t ch : value) {
+        if (ch == L'\'') {
+            escaped += L"''";
+        } else {
+            escaped.push_back(ch);
+        }
+    }
+    escaped.push_back(L'\'');
+    return escaped;
+}
+
+void ThrowIfCanceled(const FfmpegInstallCancelCallback& isCanceled) {
+    if (isCanceled && isCanceled()) {
+        throw std::runtime_error("operation canceled");
+    }
+}
+
+void RunProcessCancelable(std::wstring command, const FfmpegInstallCancelCallback& isCanceled, const wchar_t* failureMessage) {
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        throw std::runtime_error("failed to start process");
+    }
+
+    DWORD wait = WAIT_TIMEOUT;
+    while (wait == WAIT_TIMEOUT) {
+        if (isCanceled && isCanceled()) {
+            TerminateProcess(process.hProcess, 1);
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+            throw std::runtime_error("operation canceled");
+        }
+        wait = WaitForSingleObject(process.hProcess, 100);
+    }
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (exitCode != 0) {
+        throw std::runtime_error("process failed");
+    }
+    (void)failureMessage;
+}
+
+void ExtractZip(const std::filesystem::path& archive, const std::filesystem::path& extractDir, const FfmpegInstallCancelCallback& isCanceled) {
+    std::error_code ec;
+    std::filesystem::create_directories(extractDir, ec);
+    if (ec) {
+        throw std::runtime_error("failed to create extract directory");
+    }
+
+    std::filesystem::path powershell = L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    if (!std::filesystem::is_regular_file(powershell, ec)) {
+        powershell = L"powershell.exe";
+    }
+    std::wstring command =
+        Quote(powershell) +
+        L" -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath " +
+        QuotePowerShellLiteral(archive) +
+        L" -DestinationPath " +
+        QuotePowerShellLiteral(extractDir) +
+        L" -Force\"";
+    RunProcessCancelable(std::move(command), isCanceled, L"failed to extract FFmpeg archive");
+}
+
+std::filesystem::path FindFfmpegBinDir(const std::filesystem::path& extractedRoot) {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(extractedRoot, ec)) {
+        if (ec) {
+            break;
+        }
+        if (entry.is_regular_file(ec) && entry.path().filename() == L"ffmpeg.exe") {
+            return entry.path().parent_path();
+        }
+    }
+    return {};
+}
+
+void CopyIfExists(const std::filesystem::path& source, const std::filesystem::path& target) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(source, ec)) {
+        return;
+    }
+    std::filesystem::create_directories(target.parent_path(), ec);
+    if (ec) {
+        throw std::runtime_error("failed to create FFmpeg target directory");
+    }
+    std::filesystem::copy_file(source, target, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        throw std::runtime_error("failed to copy FFmpeg binary");
+    }
 }
 
 std::wstring Trim(std::wstring text) {
@@ -403,57 +529,78 @@ std::wstring FormatFfmpegProgressText(std::uint64_t convertedMs, std::uint64_t t
     return text;
 }
 
-bool InstallFfmpeg(const AppPaths& paths, std::wstring& errorText) {
-    const std::filesystem::path script = paths.stuffDir() / L"install-ffmpeg.ps1";
-    const std::filesystem::path zip = paths.stuffDir() / L"ffmpeg.zip";
+bool InstallFfmpeg(
+    const AppPaths& paths,
+    std::wstring& errorText,
+    const FfmpegInstallProgressCallback& onProgress,
+    const FfmpegInstallCancelCallback& isCanceled
+) {
+    const std::filesystem::path archive = paths.stuffDir() / L"ffmpeg-release-essentials.zip";
     const std::filesystem::path extract = paths.stuffDir() / L"ffmpeg_extract";
     const std::filesystem::path target = paths.root() / L"tools" / L"ffmpeg" / L"bin";
+    CleanupPaths cleanup({archive, extract});
 
-    std::error_code ec;
-    std::filesystem::create_directories(paths.stuffDir(), ec);
-    std::filesystem::create_directories(target, ec);
+    try {
+        std::error_code ec;
+        std::filesystem::create_directories(paths.stuffDir(), ec);
+        std::filesystem::remove(archive, ec);
+        ec.clear();
+        std::filesystem::remove_all(extract, ec);
 
-    std::wofstream out(script);
-    if (!out) {
-        errorText = L"Не удалось создать install script";
+        if (onProgress) {
+            onProgress(0, 0, L"Скачивание FFmpeg...");
+        }
+        WinHttpClient::DownloadFile(
+            kFfmpegDownloadUrl,
+            archive,
+            {},
+            [onProgress](std::uint64_t downloaded, std::uint64_t total) {
+                if (onProgress) {
+                    onProgress(downloaded, total, L"Скачивание FFmpeg...");
+                }
+            },
+            isCanceled
+        );
+
+        ThrowIfCanceled(isCanceled);
+        if (onProgress) {
+            onProgress(0, 0, L"Распаковка FFmpeg...");
+        }
+        ExtractZip(archive, extract, isCanceled);
+
+        ThrowIfCanceled(isCanceled);
+        const std::filesystem::path bin = FindFfmpegBinDir(extract);
+        if (bin.empty()) {
+            throw std::runtime_error("ffmpeg.exe was not found in archive");
+        }
+
+        if (onProgress) {
+            onProgress(0, 0, L"Установка FFmpeg...");
+        }
+        CopyIfExists(bin / L"ffmpeg.exe", target / L"ffmpeg.exe");
+        CopyIfExists(bin / L"ffprobe.exe", target / L"ffprobe.exe");
+        CopyIfExists(bin / L"ffplay.exe", target / L"ffplay.exe");
+
+        if (!IsFfmpegExe(target / L"ffmpeg.exe")) {
+            throw std::runtime_error("installed FFmpeg could not be resolved");
+        }
+        if (onProgress) {
+            onProgress(0, 0, L"FFmpeg установлен.");
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        errorText = Utf8ToWide(ex.what());
+        if (errorText == L"operation canceled") {
+            errorText = L"Установка отменена.";
+        } else if (errorText.empty()) {
+            errorText = L"Установка FFmpeg не выполнена.";
+        }
         return false;
     }
-    out <<
-        L"$ErrorActionPreference='Stop'\n"
-        L"$url='https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'\n"
-        L"$zip='" << zip.wstring() << L"'\n"
-        L"$extract='" << extract.wstring() << L"'\n"
-        L"$target='" << target.wstring() << L"'\n"
-        L"Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue\n"
-        L"Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue\n"
-        L"Invoke-WebRequest -Uri $url -OutFile $zip\n"
-        L"Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force\n"
-        L"$bin=(Get-ChildItem -LiteralPath $extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1).Directory.FullName\n"
-        L"if (-not $bin) { throw 'ffmpeg.exe not found in archive' }\n"
-        L"New-Item -ItemType Directory -Path $target -Force | Out-Null\n"
-        L"Copy-Item -LiteralPath (Join-Path $bin 'ffmpeg.exe') -Destination $target -Force\n"
-        L"Copy-Item -LiteralPath (Join-Path $bin 'ffprobe.exe') -Destination $target -Force -ErrorAction SilentlyContinue\n"
-        L"Copy-Item -LiteralPath (Join-Path $bin 'ffplay.exe') -Destination $target -Force -ErrorAction SilentlyContinue\n";
-    out.close();
+}
 
-    std::wstring command = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File " + Quote(script);
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        errorText = L"Не удалось запустить PowerShell";
-        return false;
-    }
-    WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(process.hProcess, &exitCode);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    if (exitCode != 0 || !IsFfmpegExe(target / L"ffmpeg.exe")) {
-        errorText = L"Установка FFmpeg не выполнена";
-        return false;
-    }
-    return true;
+bool InstallFfmpeg(const AppPaths& paths, std::wstring& errorText) {
+    return InstallFfmpeg(paths, errorText, {}, {});
 }
 
 bool ConvertWithFfmpeg(

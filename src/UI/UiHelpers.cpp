@@ -35,6 +35,41 @@ void EnableDarkTitleBar(HWND window) {
     }
 }
 
+void CloseDialogWindow(HWND window) {
+    if (!window || !IsWindow(window)) {
+        return;
+    }
+    ShowWindow(window, SW_HIDE);
+    DestroyWindow(window);
+}
+
+bool DisableModalOwner(HWND owner) {
+    const bool ownerWasEnabled = owner && IsWindow(owner) && IsWindowEnabled(owner);
+    if (ownerWasEnabled) {
+        EnableWindow(owner, FALSE);
+    }
+    return ownerWasEnabled;
+}
+
+void RestoreModalOwnerWindow(HWND owner, bool ownerWasEnabled) {
+    if (!ownerWasEnabled || !IsWindow(owner)) {
+        return;
+    }
+    EnableWindow(owner, TRUE);
+    if (IsIconic(owner)) {
+        ShowWindow(owner, SW_RESTORE);
+    } else if (IsZoomed(owner)) {
+        ShowWindow(owner, SW_SHOWMAXIMIZED);
+    } else if (!IsWindowVisible(owner)) {
+        ShowWindow(owner, SW_SHOW);
+    }
+    SetWindowPos(owner, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    BringWindowToTop(owner);
+    SetForegroundWindow(owner);
+    SetActiveWindow(owner);
+    SetFocus(owner);
+}
+
 HFONT CreateUiFont(int height, int weight) {
     LOGFONTW font = {};
     font.lfHeight = height;

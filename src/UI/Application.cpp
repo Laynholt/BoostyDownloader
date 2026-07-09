@@ -16,11 +16,13 @@
 #include <gdiplus.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -333,16 +335,16 @@ LRESULT CALLBACK EditContextMenuProc(HWND window, UINT message, WPARAM wParam, L
             }
             ExecuteEditContextCommand(state->edit, commandId);
         }
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         break;
     case WM_KILLFOCUS:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     case WM_NCDESTROY:
         delete state;
@@ -478,9 +480,13 @@ constexpr UINT kDialogInstall = 301;
 constexpr UINT kDialogChoose = 302;
 constexpr UINT kDialogClose = 303;
 constexpr UINT kDialogDone = WM_APP + 30;
+constexpr UINT kProgressUpdateMessage = WM_APP + 31;
+constexpr UINT kProgressDoneMessage = WM_APP + 32;
 constexpr UINT kUpdateFoundMessage = WM_APP + 80;
-constexpr int kFfmpegDialogWidth = 600;
+constexpr int kFfmpegDialogWidth = 620;
 constexpr int kFfmpegDialogHeight = 370;
+constexpr const wchar_t* kAppUserModelId = L"Laynholt.BoostyDownloader";
+constexpr int kFolderRowOffset = 6;
 constexpr const wchar_t* kLogViewClassName = L"BoostyLogView";
 constexpr const wchar_t* kLogCopyMenuClassName = L"BoostyLogCopyMenu";
 constexpr int kScrollTextTopPadding = 12;
@@ -565,6 +571,24 @@ struct FfmpegDialogState {
     UINT hotButton = 0;
     UINT pressedButton = 0;
     std::jthread worker;
+};
+
+struct FfmpegInstallDialogState {
+    AppConfig* config = nullptr;
+    const AppPaths* paths = nullptr;
+    std::wstring title = L"Установка FFmpeg";
+    std::wstring message = L"Подготовка...";
+    std::wstring error;
+    std::uint64_t downloaded = 0;
+    std::uint64_t total = 0;
+    bool done = false;
+    bool success = false;
+    std::vector<DialogButton> buttons;
+    UINT hotButton = 0;
+    UINT pressedButton = 0;
+    HANDLE cancelEvent = nullptr;
+    std::jthread worker;
+    std::mutex mutex;
 };
 
 struct UpdatePromptState {
@@ -744,19 +768,24 @@ void LayoutFfmpegDialog(FfmpegDialogState* state, const RECT& client) {
     if (!state) {
         return;
     }
-    const int bottom = client.bottom - 30;
+    constexpr int panelInset = 16;
+    constexpr int buttonInset = 20;
+    constexpr int buttonHeight = 42;
+    constexpr int buttonGap = 16;
+    const RECT panel{panelInset, panelInset, client.right - panelInset, client.bottom - panelInset};
+    const int bottom = panel.bottom - buttonInset;
     if (state->config) {
-        constexpr int left = 28;
-        constexpr int width = 170;
-        constexpr int gap = 14;
+        const int left = panel.left + buttonInset;
+        const int availableWidth = panel.right - panel.left - (buttonInset * 2) - (buttonGap * 2);
+        const int width = std::max(150, availableWidth / 3);
         state->buttons = {
-            {kDialogInstall, {left, bottom - 42, left + width, bottom}, L"Установить", true, !state->installing, true},
-            {kDialogChoose, {left + width + gap, bottom - 42, left + (width * 2) + gap, bottom}, L"Выбрать папку", false, !state->installing, true},
-            {kDialogClose, {left + (width * 2) + (gap * 2), bottom - 42, left + (width * 3) + (gap * 2), bottom}, L"Пропустить", false, !state->installing, true}
+            {kDialogInstall, {left, bottom - buttonHeight, left + width, bottom}, L"Установить", true, !state->installing, true},
+            {kDialogChoose, {left + width + buttonGap, bottom - buttonHeight, left + (width * 2) + buttonGap, bottom}, L"Выбрать папку", false, !state->installing, true},
+            {kDialogClose, {panel.right - buttonInset - width, bottom - buttonHeight, panel.right - buttonInset, bottom}, L"Пропустить", false, !state->installing, true}
         };
     } else {
         state->buttons = {
-            {kDialogClose, {client.right - 178, bottom - 42, client.right - 36, bottom}, L"Закрыть", true, true, true}
+            {kDialogClose, {panel.right - buttonInset - 142, bottom - buttonHeight, panel.right - buttonInset, bottom}, L"Закрыть", true, true, true}
         };
     }
 }
@@ -777,21 +806,349 @@ void PaintFfmpegDialog(HWND window, FfmpegDialogState* state, HDC dc) {
     DrawSettingsButtons(dc, state->buttons, state->pressedButton, state->hotButton);
 }
 
-void ChooseFfmpegFolder(HWND window, FfmpegDialogState* state) {
-    BROWSEINFOW info = {};
-    info.hwndOwner = window;
-    info.lpszTitle = L"Выберите папку с ffmpeg.exe";
-    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    if (PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&info)) {
-        wchar_t path[MAX_PATH] = {};
-        if (SHGetPathFromIDListW(item, path) && state && state->config) {
-            state->config->ffmpegPath = path;
-            state->saved = true;
-            RefreshFfmpegDialogText(state);
+void RunModal(HWND owner, HWND dialog);
+
+void LayoutFfmpegInstallDialog(FfmpegInstallDialogState* state, const RECT& client) {
+    if (!state) {
+        return;
+    }
+    constexpr int panelInset = 16;
+    constexpr int buttonInset = 20;
+    constexpr int buttonHeight = 42;
+    const RECT panel{panelInset, panelInset, client.right - panelInset, client.bottom - panelInset};
+    const int buttonWidth = state->done && state->success ? 132 : 112;
+    const int bottom = panel.bottom - buttonInset;
+    const std::wstring text = state->done ? (state->success ? L"Готово" : L"Закрыть") : L"Отмена";
+    state->buttons = {
+        {kDialogClose, {panel.right - buttonInset - buttonWidth, bottom - buttonHeight, panel.right - buttonInset, bottom}, text, state->done && state->success, true, true}
+    };
+}
+
+int ProgressPercent(std::uint64_t downloaded, std::uint64_t total, bool success) {
+    if (success) {
+        return 100;
+    }
+    if (total == 0) {
+        return 0;
+    }
+    return std::clamp(static_cast<int>((downloaded * 100) / total), 0, 100);
+}
+
+std::wstring ProgressByteText(std::uint64_t value) {
+    const wchar_t* units[] = {L"B", L"KB", L"MB", L"GB"};
+    double amount = static_cast<double>(value);
+    int unit = 0;
+    while (amount >= 1024.0 && unit < 3) {
+        amount /= 1024.0;
+        ++unit;
+    }
+    std::wostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(unit == 0 ? 0 : 1);
+    out << amount << L' ' << units[unit];
+    return out.str();
+}
+
+std::wstring ProgressBytesText(std::uint64_t downloaded, std::uint64_t total) {
+    if (downloaded == 0 && total == 0) {
+        return {};
+    }
+    if (total > 0) {
+        return ProgressByteText(downloaded) + L" / " + ProgressByteText(total);
+    }
+    return ProgressByteText(downloaded);
+}
+
+void PaintFfmpegInstallDialog(HWND window, FfmpegInstallDialogState* state, HDC dc) {
+    RECT client{};
+    GetClientRect(window, &client);
+    LayoutFfmpegInstallDialog(state, client);
+
+    std::wstring title;
+    std::wstring message;
+    std::uint64_t downloaded = 0;
+    std::uint64_t total = 0;
+    bool success = false;
+    if (state) {
+        std::lock_guard lock(state->mutex);
+        title = state->title;
+        message = state->done && !state->success && !state->error.empty() ? state->error : state->message;
+        downloaded = state->downloaded;
+        total = state->total;
+        success = state->success;
+    }
+
+    UiRenderer::DrawBackground(dc, client);
+    UiRenderer::DrawPanel(dc, {16, 16, client.right - 16, client.bottom - 16});
+    DrawTextLine(dc, title.empty() ? L"Установка FFmpeg" : title, {32, 40, client.right - 32, 70}, 18, RGB(242, 242, 242));
+    DrawTextLine(dc, message, {32, 84, client.right - 32, 114}, 15, RGB(242, 242, 242), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    const std::wstring sizes = ProgressBytesText(downloaded, total);
+    if (!sizes.empty()) {
+        DrawTextLine(dc, sizes, {32, 116, client.right - 32, 138}, 13, RGB(170, 170, 178));
+    }
+
+    const int percent = ProgressPercent(downloaded, total, success);
+    const int actionLeft = state && !state->buttons.empty() ? state->buttons.front().rect.left : client.right - 156;
+    const int percentRight = actionLeft - 24;
+    const int percentLeft = percentRight - 52;
+    const int progressRight = std::max(96, percentLeft - 10);
+    UiRenderer::DrawProgressBar(dc, {32, 152, progressRight, 160}, static_cast<double>(percent));
+    DrawTextLine(dc, std::to_wstring(percent) + L"%", {percentLeft, 142, percentRight, 168}, 13, RGB(170, 170, 178), DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    if (state) {
+        DrawSettingsButtons(dc, state->buttons, state->pressedButton, state->hotButton);
+    }
+}
+
+void InvalidateFfmpegInstallContent(HWND window) {
+    RECT client{};
+    GetClientRect(window, &client);
+    RECT content{20, 68, client.right - 20, 174};
+    InvalidateRect(window, &content, FALSE);
+}
+
+void StartFfmpegInstallWorker(HWND window, FfmpegInstallDialogState* state) {
+    if (!state || !state->paths || !state->config || !state->cancelEvent) {
+        return;
+    }
+    const AppPaths paths = *state->paths;
+    AppConfig* config = state->config;
+    HANDLE cancelEvent = state->cancelEvent;
+    state->worker = std::jthread([window, state, paths, config, cancelEvent](std::stop_token) {
+        std::wstring error;
+        const bool ok = InstallFfmpeg(
+            paths,
+            error,
+            [window, state](std::uint64_t downloaded, std::uint64_t total, const std::wstring& status) {
+                {
+                    std::lock_guard lock(state->mutex);
+                    state->downloaded = downloaded;
+                    state->total = total;
+                    state->message = status;
+                }
+                PostMessageW(window, kProgressUpdateMessage, 0, 0);
+            },
+            [cancelEvent] {
+                return cancelEvent && WaitForSingleObject(cancelEvent, 0) == WAIT_OBJECT_0;
+            }
+        );
+        {
+            std::lock_guard lock(state->mutex);
+            state->done = true;
+            state->success = ok;
+            state->error = ok ? std::wstring{} : error;
+            state->message = ok ? L"FFmpeg установлен." : L"Установка FFmpeg не выполнена.";
+            if (ok && config) {
+                config->ffmpegPath = paths.root() / L"tools" / L"ffmpeg" / L"bin" / L"ffmpeg.exe";
+            }
+        }
+        PostMessageW(window, kProgressDoneMessage, ok ? TRUE : FALSE, 0);
+    });
+}
+
+LRESULT CALLBACK FfmpegInstallDialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<FfmpegInstallDialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    switch (message) {
+    case WM_NCCREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+        return TRUE;
+    }
+    case WM_CREATE:
+        state = reinterpret_cast<FfmpegInstallDialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        EnableDarkTitleBar(window);
+        if (state) {
+            StartFfmpegInstallWorker(window, state);
+        }
+        return 0;
+    case kProgressUpdateMessage:
+        InvalidateFfmpegInstallContent(window);
+        return 0;
+    case kProgressDoneMessage:
+        if (state) {
+            LayoutFfmpegInstallDialog(state, RECT{0, 0, 560, 270});
+        }
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    case WM_MOUSEMOVE: {
+        if (!state) {
+            return 0;
+        }
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        DialogButton* hit = HitDialogButton(state->buttons, point);
+        const UINT hot = hit ? hit->id : 0;
+        if (hot != state->hotButton) {
+            state->hotButton = hot;
+            InvalidateRect(window, nullptr, FALSE);
+            TRACKMOUSEEVENT event{sizeof(event), TME_LEAVE, window, 0};
+            TrackMouseEvent(&event);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (state) {
+            state->hotButton = 0;
             InvalidateRect(window, nullptr, FALSE);
         }
-        CoTaskMemFree(item);
+        return 0;
+    case WM_LBUTTONDOWN: {
+        if (!state) {
+            return 0;
+        }
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (DialogButton* hit = HitDialogButton(state->buttons, point)) {
+            state->pressedButton = hit->id;
+            SetCapture(window);
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
     }
+    case WM_LBUTTONUP: {
+        if (!state) {
+            return 0;
+        }
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const UINT pressed = state->pressedButton;
+        state->pressedButton = 0;
+        ReleaseCapture();
+        InvalidateRect(window, nullptr, FALSE);
+        if (DialogButton* hit = HitDialogButton(state->buttons, point); hit && hit->id == pressed) {
+            if (!state->done) {
+                if (state->cancelEvent) {
+                    SetEvent(state->cancelEvent);
+                }
+                {
+                    std::lock_guard lock(state->mutex);
+                    state->message = L"Отмена...";
+                }
+                InvalidateFfmpegInstallContent(window);
+            } else {
+                CloseDialogWindow(window);
+            }
+        }
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(window, &ps);
+        RECT client{};
+        GetClientRect(window, &client);
+        HDC memoryDc = CreateCompatibleDC(dc);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right - client.left, client.bottom - client.top);
+        HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+        PaintFfmpegInstallDialog(window, state, memoryDc);
+        BitBlt(dc, 0, 0, client.right - client.left, client.bottom - client.top, memoryDc, 0, 0, SRCCOPY);
+        SelectObject(memoryDc, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(memoryDc);
+        EndPaint(window, &ps);
+        return 0;
+    }
+    case WM_CLOSE:
+        if (state && !state->done) {
+            if (state->cancelEvent) {
+                SetEvent(state->cancelEvent);
+            }
+            {
+                std::lock_guard lock(state->mutex);
+                state->message = L"Отмена...";
+            }
+            InvalidateFfmpegInstallContent(window);
+            return 0;
+        }
+        CloseDialogWindow(window);
+        return 0;
+    case WM_NCDESTROY:
+        if (state && state->worker.joinable()) {
+            if (state->cancelEvent) {
+                SetEvent(state->cancelEvent);
+            }
+            state->worker.request_stop();
+            state->worker.join();
+        }
+        if (state && state->cancelEvent) {
+            CloseHandle(state->cancelEvent);
+            state->cancelEvent = nullptr;
+        }
+        return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+bool ShowFfmpegInstallProgress(HWND owner, HINSTANCE instance, const AppPaths& paths, AppConfig& config) {
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = FfmpegInstallDialogProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = CreateSolidBrush(RGB(18, 18, 20));
+    wc.lpszClassName = L"BoostyFfmpegInstallWindow";
+    RegisterClassW(&wc);
+
+    FfmpegInstallDialogState state{};
+    state.paths = &paths;
+    state.config = &config;
+    state.cancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!state.cancelEvent) {
+        return false;
+    }
+
+    RECT ownerRect{};
+    GetWindowRect(owner, &ownerRect);
+    constexpr int width = 560;
+    constexpr int height = 270;
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        wc.lpszClassName,
+        L"FFmpeg",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2,
+        ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2,
+        width,
+        height,
+        owner,
+        nullptr,
+        instance,
+        &state
+    );
+    if (!dialog) {
+        CloseHandle(state.cancelEvent);
+        state.cancelEvent = nullptr;
+        return false;
+    }
+
+    RunModal(owner, dialog);
+    return state.success;
+}
+
+void ChooseFfmpegFolder(HWND window, FfmpegDialogState* state) {
+    IFileOpenDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+        return;
+    }
+    DWORD options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    }
+    dialog->SetTitle(L"Выберите папку с ffmpeg.exe или папку bin");
+    if (SUCCEEDED(dialog->Show(window))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item))) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                if (state && state->config) {
+                    state->config->ffmpegPath = path;
+                    state->saved = true;
+                    RefreshFfmpegDialogText(state);
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
 }
 
 LRESULT CALLBACK FfmpegDialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -865,20 +1222,16 @@ LRESULT CALLBACK FfmpegDialogProc(HWND window, UINT message, WPARAM wParam, LPAR
         ReleaseCapture();
         InvalidateRect(window, nullptr, FALSE);
         if (DialogButton* hit = HitDialogButton(state->buttons, point); hit && hit->id == pressed) {
-            if (pressed == kDialogInstall && state->paths) {
-                state->installing = true;
-                state->status = L"Скачивание и распаковка FFmpeg...";
-                SetTimer(window, 1, 60, nullptr);
-                state->worker = std::jthread([window, state] {
-                    std::wstring error;
-                    state->installOk = InstallFfmpeg(*state->paths, error);
-                    state->status = state->installOk ? L"FFmpeg установлен." : error;
-                    PostMessageW(window, kDialogDone, 0, 0);
-                });
+            if (pressed == kDialogInstall && state->paths && state->config) {
+                if (ShowFfmpegInstallProgress(window, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)), *state->paths, *state->config)) {
+                    state->saved = true;
+                    RefreshFfmpegDialogText(state);
+                    InvalidateRect(window, nullptr, FALSE);
+                }
             } else if (pressed == kDialogChoose) {
                 ChooseFfmpegFolder(window, state);
             } else if (pressed == kDialogClose) {
-                DestroyWindow(window);
+                CloseDialogWindow(window);
             }
         }
         return 0;
@@ -903,23 +1256,51 @@ LRESULT CALLBACK FfmpegDialogProc(HWND window, UINT message, WPARAM wParam, LPAR
     }
     case WM_CLOSE:
         if (!state || !state->installing) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
         }
         return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-void RestoreModalOwner(HWND owner) {
-    if (!owner) {
+void RestoreModalOwner(HWND owner, bool ownerWasEnabled) {
+    if (!ownerWasEnabled || !IsWindow(owner)) {
         return;
     }
+
     EnableWindow(owner, TRUE);
-    ShowWindow(owner, IsIconic(owner) ? SW_RESTORE : SW_SHOW);
-    SetWindowPos(owner, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    if (IsIconic(owner)) {
+        ShowWindow(owner, SW_RESTORE);
+    } else if (IsZoomed(owner)) {
+        ShowWindow(owner, SW_SHOWMAXIMIZED);
+    } else if (!IsWindowVisible(owner)) {
+        ShowWindow(owner, SW_SHOW);
+    }
+    SetWindowPos(owner, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    BringWindowToTop(owner);
     SetForegroundWindow(owner);
     SetActiveWindow(owner);
     SetFocus(owner);
+}
+
+void RunModal(HWND owner, HWND dialog) {
+    const bool ownerWasEnabled = owner && IsWindow(owner) && IsWindowEnabled(owner);
+    if (ownerWasEnabled) {
+        EnableWindow(owner, FALSE);
+    }
+
+    ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
+
+    MSG msg{};
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    RestoreModalOwner(owner, ownerWasEnabled);
 }
 
 bool ShowFfmpegModal(HWND owner, HINSTANCE instance, const AppPaths& paths, AppConfig& config) {
@@ -942,16 +1323,7 @@ bool ShowFfmpegModal(HWND owner, HINSTANCE instance, const AppPaths& paths, AppC
     if (!dialog) {
         return false;
     }
-    EnableWindow(owner, FALSE);
-    ShowWindow(dialog, SW_SHOW);
-    MSG msg{};
-    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(dialog, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    RestoreModalOwner(owner);
+    RunModal(owner, dialog);
     return state.saved;
 }
 
@@ -975,16 +1347,7 @@ void ShowFfmpegInfoModal(HWND owner, HINSTANCE instance, const std::wstring& tit
     if (!dialog) {
         return;
     }
-    EnableWindow(owner, FALSE);
-    ShowWindow(dialog, SW_SHOW);
-    MSG msg{};
-    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(dialog, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    RestoreModalOwner(owner);
+    RunModal(owner, dialog);
 }
 
 std::wstring QualityFromButton(UINT id) {
@@ -1346,18 +1709,18 @@ LRESULT CALLBACK UpdatePromptProc(HWND window, UINT message, WPARAM wParam, LPAR
         InvalidateRect(window, nullptr, FALSE);
         if (DialogButton* hit = HitDialogButton(state->buttons, point); hit && hit->id == pressed) {
             state->accepted = hit->id == kDialogInstall;
-            DestroyWindow(window);
+            CloseDialogWindow(window);
         }
         return 0;
     }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         if (wParam == VK_RETURN && state) {
             state->accepted = true;
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         break;
@@ -1378,7 +1741,7 @@ LRESULT CALLBACK UpdatePromptProc(HWND window, UINT message, WPARAM wParam, LPAR
         return 0;
     }
     case WM_CLOSE:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
@@ -1417,18 +1780,7 @@ bool ShowUpdatePrompt(HWND owner, HINSTANCE instance, const std::wstring& messag
         return false;
     }
     EnableDarkTitleBar(dialog);
-    EnableWindow(owner, FALSE);
-    ShowWindow(dialog, SW_SHOW);
-
-    MSG messageLoop{};
-    while (IsWindow(dialog) && GetMessageW(&messageLoop, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(dialog, &messageLoop)) {
-            TranslateMessage(&messageLoop);
-            DispatchMessageW(&messageLoop);
-        }
-    }
-    EnableWindow(owner, TRUE);
-    SetActiveWindow(owner);
+    RunModal(owner, dialog);
     return state.accepted;
 }
 
@@ -1497,10 +1849,10 @@ void HandleSettingsCommand(HWND window, SettingsState* state, UINT id) {
         break;
     case kSettingsSave:
         state->saved = true;
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         break;
     case kSettingsCancel:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         break;
     default:
         break;
@@ -1572,12 +1924,12 @@ LRESULT CALLBACK SettingsProc(HWND window, UINT message, WPARAM wParam, LPARAM l
     }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         if (wParam == VK_RETURN && state) {
             state->saved = true;
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         break;
@@ -1598,7 +1950,7 @@ LRESULT CALLBACK SettingsProc(HWND window, UINT message, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_CLOSE:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
@@ -1637,18 +1989,7 @@ bool ShowSettingsModal(HWND owner, HINSTANCE instance, const AppPaths& paths, Ap
     if (!dialog) {
         return false;
     }
-    EnableWindow(owner, FALSE);
-    ShowWindow(dialog, SW_SHOW);
-
-    MSG msg = {};
-    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(dialog, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    EnableWindow(owner, TRUE);
-    SetActiveWindow(owner);
+    RunModal(owner, dialog);
     if (state.saved) {
         config = state.config;
     }
@@ -1818,23 +2159,23 @@ LRESULT CALLBACK LogCopyMenuProc(HWND window, UINT message, WPARAM wParam, LPARA
         if (state) {
             CopyTextToClipboard(state->owner ? state->owner : window, state->text);
         }
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         if (wParam == VK_RETURN || wParam == VK_SPACE) {
             if (state) {
                 CopyTextToClipboard(state->owner ? state->owner : window, state->text);
             }
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         break;
     case WM_KILLFOCUS:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     case WM_NCDESTROY:
         delete state;
@@ -2058,7 +2399,7 @@ void HandleLogsCommand(HWND window, LogsDialogState* state, UINT id) {
         return;
     }
     if (id == kLogClose) {
-        DestroyWindow(window);
+        CloseDialogWindow(window);
     }
 }
 
@@ -2139,7 +2480,7 @@ LRESULT CALLBACK LogsProc(HWND window, UINT message, WPARAM wParam, LPARAM lPara
     }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         break;
@@ -2160,7 +2501,7 @@ LRESULT CALLBACK LogsProc(HWND window, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
     }
     case WM_CLOSE:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
@@ -2216,23 +2557,15 @@ void ShowLogsModal(HWND owner, HINSTANCE instance, const std::wstring& text) {
     if (!dialog) {
         return;
     }
-    EnableWindow(owner, FALSE);
-    ShowWindow(dialog, SW_SHOW);
-    MSG msg{};
-    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(dialog, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    EnableWindow(owner, TRUE);
-    SetActiveWindow(owner);
+    RunModal(owner, dialog);
 }
 
 } // namespace
 
 int Application::Run(HINSTANCE instance, int showCommand) {
     m_instance = instance;
+    SetCurrentProcessExplicitAppUserModelID(kAppUserModelId);
+
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
     RegisterPopupMenuClasses(m_instance);
@@ -2604,7 +2937,7 @@ void Application::Layout() {
     const int inputWidth = std::max(260, inputRight - margin);
 
     MoveWindow(m_urlEdit, margin + 8, 92, inputWidth - 16, 24, TRUE);
-    MoveWindow(m_folderEdit, margin + 8, 158, inputWidth - 16, 24, TRUE);
+    MoveWindow(m_folderEdit, margin + 8, 158 + kFolderRowOffset, inputWidth - 16, 24, TRUE);
     AddButtons();
     UpdateTooltips();
 }
@@ -2621,7 +2954,7 @@ void Application::AddButtons() {
     const int right = w - margin;
     m_buttons = {
         {kBtnPaste, {sideButtonLeft, 86, right, 122}, L"Вставить", false},
-        {kBtnBrowse, {sideButtonLeft, 152, right, 188}, L"Выбрать...", false},
+        {kBtnBrowse, {sideButtonLeft, 152 + kFolderRowOffset, right, 188 + kFolderRowOffset}, L"Выбрать...", false},
         {kBtnDownload, {margin, 220, margin + 120, 256}, L"Скачать", true},
         {kBtnLogin, {margin + 132, 220, margin + 322, 256}, L"Получить токен", false},
         {kBtnSettings, {right - 150, 220, right, 256}, L"Настройки", false},
@@ -2668,14 +3001,14 @@ void Application::Paint(HDC dc) {
 
     DrawTextLine(dc, L"Boosty Downloader", {28, 22, client.right - 28, 52}, 26, RGB(242, 242, 242));
     DrawTextLine(dc, L"URL поста или несколько строк", {28, 60, 420, 80}, 15, RGB(180, 180, 186));
-    DrawTextLine(dc, L"Папка загрузки", {28, 126, 220, 146}, 15, RGB(180, 180, 186));
+    DrawTextLine(dc, L"Папка загрузки", {28, 126 + kFolderRowOffset, 220, 146 + kFolderRowOffset}, 15, RGB(180, 180, 186));
 
     const int margin = 28;
     const int buttonWidth = 150;
     const int buttonGap = 12;
     const int inputRight = std::max(520, static_cast<int>(client.right) - margin - buttonWidth - buttonGap);
     UiRenderer::DrawInputFrame(dc, {margin, 84, inputRight, 124});
-    UiRenderer::DrawInputFrame(dc, {margin, 150, inputRight, 190});
+    UiRenderer::DrawInputFrame(dc, {margin, 150 + kFolderRowOffset, inputRight, 190 + kFolderRowOffset});
 
     for (const Button& button : m_buttons) {
         UiRenderer::DrawButton(

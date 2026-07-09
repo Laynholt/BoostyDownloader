@@ -308,7 +308,7 @@ LRESULT CALLBACK LoginProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
                 if (pressed == kSaveToken) {
                     SaveAuth(window, state);
                 } else if (pressed == kClose) {
-                    DestroyWindow(window);
+                    CloseDialogWindow(window);
                 }
             }
             return 0;
@@ -337,12 +337,12 @@ LRESULT CALLBACK LoginProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
             return 0;
         }
         if (LOWORD(wParam) == kClose) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         break;
     case kAuthSaved:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     case WM_DESTROY:
         if (state) {
@@ -370,7 +370,7 @@ bool ShowBoostyLoginDialog(HWND owner, HINSTANCE instance, const AppPaths& paths
         WS_EX_DLGMODALFRAME,
         className,
         L"Boosty авторизация",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         1100,
@@ -383,17 +383,18 @@ bool ShowBoostyLoginDialog(HWND owner, HINSTANCE instance, const AppPaths& paths
     if (!window) {
         return false;
     }
-    EnableWindow(owner, FALSE);
+    const bool ownerWasEnabled = DisableModalOwner(owner);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
     MSG msg = {};
     while (IsWindow(window) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
     if (IsWindow(window)) {
-        DestroyWindow(window);
+        CloseDialogWindow(window);
     }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
+    RestoreModalOwnerWindow(owner, ownerWasEnabled);
     return state.saved;
 }
 

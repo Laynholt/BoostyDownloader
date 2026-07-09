@@ -361,14 +361,14 @@ LRESULT CALLBACK MessageDialogProc(HWND window, UINT message, WPARAM wParam, LPA
             if (hit->id == kCopy && state) {
                 CopyTextToClipboard(window, state->message);
             } else {
-                DestroyWindow(window);
+                CloseDialogWindow(window);
             }
         }
         return 0;
     }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE || wParam == VK_RETURN) {
-            DestroyWindow(window);
+            CloseDialogWindow(window);
             return 0;
         }
         break;
@@ -389,7 +389,7 @@ LRESULT CALLBACK MessageDialogProc(HWND window, UINT message, WPARAM wParam, LPA
         return 0;
     }
     case WM_CLOSE:
-        DestroyWindow(window);
+        CloseDialogWindow(window);
         return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
@@ -449,10 +449,9 @@ void ShowCustomMessageDialog(
     }
 
     EnableDarkTitleBar(dialog);
-    if (owner) {
-        EnableWindow(owner, FALSE);
-    }
+    const bool ownerWasEnabled = DisableModalOwner(owner);
     ShowWindow(dialog, SW_SHOW);
+    UpdateWindow(dialog);
 
     MSG msg{};
     while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -461,8 +460,5 @@ void ShowCustomMessageDialog(
             DispatchMessageW(&msg);
         }
     }
-    if (owner) {
-        EnableWindow(owner, TRUE);
-        SetActiveWindow(owner);
-    }
+    RestoreModalOwnerWindow(owner, ownerWasEnabled);
 }
