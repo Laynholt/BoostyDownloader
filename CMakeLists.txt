@@ -1,10 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(BoostyDownloader
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Portable Win32 Boosty video downloader"
     LANGUAGES CXX
 )
+
+set(BOOSTY_APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +15,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(WIN32)
     add_definitions(-DUNICODE -D_UNICODE -DNOMINMAX)
 endif()
+
+set_source_files_properties(src/App/resources.rc PROPERTIES
+    OBJECT_DEPENDS "${BOOSTY_APP_ICON}"
+)
 
 set(WEBVIEW2_SDK_DIR "" CACHE PATH "Path to Microsoft.Web.WebView2 NuGet package root")
 option(BOOSTY_FETCH_WEBVIEW2_SDK "Download Microsoft.Web.WebView2 SDK into the build directory when WEBVIEW2_SDK_DIR is empty" ON)
@@ -52,6 +58,9 @@ add_executable(BoostyDownloader WIN32
     src/App/main.cpp
     src/Core/AppPaths.cpp
     src/Core/AppPaths.h
+    src/Core/AppUpdateService.cpp
+    src/Core/AppUpdateService.h
+    src/Core/AppVersion.h
     src/Core/BoostyClient.cpp
     src/Core/BoostyClient.h
     src/Core/Config.cpp
@@ -66,6 +75,8 @@ add_executable(BoostyDownloader WIN32
     src/Core/FfmpegTools.h
     src/Core/Logger.cpp
     src/Core/Logger.h
+    src/Core/TaskFormatting.cpp
+    src/Core/TaskFormatting.h
     src/Core/Text.cpp
     src/Core/Text.h
     src/Platform/WinHttpClient.cpp
@@ -75,6 +86,8 @@ add_executable(BoostyDownloader WIN32
     src/App/resources.rc
     src/UI/LoginDialog.h
     ${BOOSTY_WEBVIEW2_SOURCES}
+    src/UI/MessageDialog.cpp
+    src/UI/MessageDialog.h
     src/UI/UiRenderer.cpp
     src/UI/UiRenderer.h
 )
@@ -101,6 +114,7 @@ target_link_libraries(BoostyDownloader PRIVATE
     shell32
     ole32
     winhttp
+    bcrypt
 )
 
 if(MSVC)
@@ -116,6 +130,9 @@ add_executable(BoostyDownloaderSelfTest
     tests/test_core.cpp
     src/Core/AppPaths.cpp
     src/Core/AppPaths.h
+    src/Core/AppUpdateService.cpp
+    src/Core/AppUpdateService.h
+    src/Core/AppVersion.h
     src/Core/BoostyClient.h
     src/Core/DownloadQueueStore.cpp
     src/Core/DownloadQueueStore.h
@@ -123,6 +140,8 @@ add_executable(BoostyDownloaderSelfTest
     src/Core/DownloadQueue.h
     src/Core/Logger.cpp
     src/Core/Logger.h
+    src/Core/TaskFormatting.cpp
+    src/Core/TaskFormatting.h
     src/Core/FfmpegTools.cpp
     src/Core/FfmpegTools.h
     src/Core/FileOperations.cpp
@@ -139,7 +158,7 @@ target_include_directories(BoostyDownloaderSelfTest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
-target_link_libraries(BoostyDownloaderSelfTest PRIVATE winhttp)
+target_link_libraries(BoostyDownloaderSelfTest PRIVATE winhttp bcrypt)
 
 if(MSVC)
     target_compile_options(BoostyDownloaderSelfTest PRIVATE /W4 /permissive- /utf-8)

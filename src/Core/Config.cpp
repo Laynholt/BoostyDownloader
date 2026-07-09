@@ -31,7 +31,7 @@ AppConfig ConfigStore::Load(const AppPaths& paths) {
     config.quality = ReadIni(paths.configPath(), L"download", L"quality", L"highest");
     config.container = ReadIni(paths.configPath(), L"download", L"container", L"auto");
     config.ffmpegPath = ReadIni(paths.configPath(), L"tools", L"ffmpeg", L"");
-    config.autoUpdateCheck = ReadInt(paths.configPath(), L"app", L"auto_update", 0) != 0;
+    config.autoUpdateCheck = ReadInt(paths.configPath(), L"app", L"auto_update", 1) != 0;
     config.maxParallelDownloads = std::clamp(ReadInt(paths.configPath(), L"download", L"workers", 3), 1, 16);
     return config;
 }

@@ -177,12 +177,17 @@ bool DownloadQueue::Retry(int id) {
     it->second.snapshot.state = DownloadTaskState::Queued;
     it->second.snapshot.statusText = L"В очереди";
     it->second.snapshot.errorText.clear();
+    it->second.snapshot.progressText.clear();
     it->second.snapshot.etaText.clear();
+    it->second.snapshot.speedBytesPerSecond = 0;
     it->second.snapshot.percent = 0;
     it->second.snapshot.downloadedBytes = 0;
     it->second.snapshot.totalBytes = 0;
     it->second.progressStartedTick = 0;
+    it->second.lastProgressTick = 0;
     it->second.lastDownloadedBytes = 0;
+    it->second.speedSampleTick = 0;
+    it->second.speedSampleBytes = 0;
     ++m_revision;
     m_cv.notify_all();
     return true;
@@ -303,6 +308,34 @@ std::uint64_t DownloadQueue::Revision() const {
     return m_revision;
 }
 
+bool DownloadQueue::RefreshDynamicStats() {
+    std::lock_guard lock(m_mutex);
+    bool changed = false;
+    const std::uint64_t now = GetTickCount64();
+    for (auto& [id, task] : m_tasks) {
+        (void)id;
+        if (!task.active || task.snapshot.state != DownloadTaskState::Downloading) {
+            continue;
+        }
+        if (task.snapshot.speedBytesPerSecond == 0 || task.lastProgressTick == 0) {
+            continue;
+        }
+        if (now - task.lastProgressTick < 1000) {
+            continue;
+        }
+        task.snapshot.speedBytesPerSecond = 0;
+        task.snapshot.etaText.clear();
+        task.speedSampleTick = now;
+        task.speedSampleBytes = task.snapshot.downloadedBytes;
+        task.lastProgressTick = now;
+        changed = true;
+    }
+    if (changed) {
+        ++m_revision;
+    }
+    return changed;
+}
+
 void DownloadQueue::Shutdown() {
     {
         std::lock_guard lock(m_mutex);
@@ -400,16 +433,35 @@ void DownloadQueue::StartTask(int id, std::stop_token stopToken) {
             if (!progress.qualityLabel.empty()) {
                 it->second.snapshot.qualityLabel = progress.qualityLabel;
             }
+            if (!progress.containerLabel.empty()) {
+                it->second.snapshot.containerLabel = progress.containerLabel;
+            }
+            it->second.snapshot.progressText = progress.progressText;
             AddUniquePath(it->second.snapshot.outputFiles, progress.outputPath);
             it->second.snapshot.statusText = progress.stage;
             it->second.snapshot.percent = std::clamp(progress.percent, 0.0, 100.0);
             it->second.snapshot.downloadedBytes = progress.downloadedBytes;
             it->second.snapshot.totalBytes = progress.totalBytes;
+            const std::uint64_t now = GetTickCount64();
             if (progress.downloadedBytes == 0 || progress.downloadedBytes < it->second.lastDownloadedBytes) {
-                it->second.progressStartedTick = GetTickCount64();
+                it->second.progressStartedTick = now;
+                it->second.lastProgressTick = now;
+                it->second.speedSampleTick = now;
+                it->second.speedSampleBytes = progress.downloadedBytes;
+                it->second.snapshot.speedBytesPerSecond = 0;
                 it->second.snapshot.etaText.clear();
             } else if (progress.totalBytes > progress.downloadedBytes && progress.downloadedBytes > 0 && it->second.progressStartedTick > 0) {
-                const std::uint64_t elapsedMs = std::max<std::uint64_t>(1, GetTickCount64() - it->second.progressStartedTick);
+                if (it->second.speedSampleTick == 0) {
+                    it->second.speedSampleTick = now;
+                    it->second.speedSampleBytes = progress.downloadedBytes;
+                } else if (now - it->second.speedSampleTick >= 500 && progress.downloadedBytes > it->second.speedSampleBytes) {
+                    const std::uint64_t deltaMs = std::max<std::uint64_t>(1, now - it->second.speedSampleTick);
+                    const std::uint64_t deltaBytes = progress.downloadedBytes - it->second.speedSampleBytes;
+                    it->second.snapshot.speedBytesPerSecond = static_cast<std::uint64_t>((static_cast<double>(deltaBytes) * 1000.0 / static_cast<double>(deltaMs)) + 0.5);
+                    it->second.speedSampleTick = now;
+                    it->second.speedSampleBytes = progress.downloadedBytes;
+                }
+                const std::uint64_t elapsedMs = std::max<std::uint64_t>(1, now - it->second.progressStartedTick);
                 const double bytesPerSecond = static_cast<double>(progress.downloadedBytes) * 1000.0 / static_cast<double>(elapsedMs);
                 if (bytesPerSecond > 0.0) {
                     const auto remaining = static_cast<std::uint64_t>((static_cast<double>(progress.totalBytes - progress.downloadedBytes) / bytesPerSecond) + 0.5);
@@ -417,8 +469,12 @@ void DownloadQueue::StartTask(int id, std::stop_token stopToken) {
                 }
             } else if (progress.totalBytes > 0 && progress.downloadedBytes >= progress.totalBytes) {
                 it->second.snapshot.etaText = L"0:00";
+                it->second.snapshot.speedBytesPerSecond = 0;
+                it->second.speedSampleTick = 0;
+                it->second.speedSampleBytes = progress.downloadedBytes;
             }
             it->second.lastDownloadedBytes = progress.downloadedBytes;
+            it->second.lastProgressTick = now;
             ++m_revision;
         }
     );

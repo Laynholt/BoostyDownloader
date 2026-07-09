@@ -1,8 +1,12 @@
 #include "Application.h"
 
+#include "AppUpdateService.h"
+#include "AppVersion.h"
 #include "DownloadQueueStore.h"
 #include "FfmpegTools.h"
 #include "LoginDialog.h"
+#include "MessageDialog.h"
+#include "TaskFormatting.h"
 #include "Text.h"
 #include "UiRenderer.h"
 
@@ -123,21 +127,6 @@ UINT TooltipInfoSize() {
 #endif
 }
 
-std::wstring BytesText(std::uint64_t value) {
-    const wchar_t* units[] = {L"B", L"KB", L"MB", L"GB"};
-    double amount = static_cast<double>(value);
-    int unit = 0;
-    while (amount >= 1024.0 && unit < 3) {
-        amount /= 1024.0;
-        ++unit;
-    }
-    std::wostringstream out;
-    out.setf(std::ios::fixed);
-    out.precision(unit == 0 ? 0 : 1);
-    out << amount << L' ' << units[unit];
-    return out.str();
-}
-
 std::wstring StateText(DownloadTaskState state) {
     switch (state) {
     case DownloadTaskState::Queued: return L"В очереди";
@@ -163,27 +152,6 @@ bool IsBoostyPostUrl(const std::wstring& url) {
     }
     const size_t idStart = posts + 7;
     return idStart < url.size() && url.find_first_of(L"?#/", idStart) > idStart;
-}
-
-std::wstring TaskMetaText(const DownloadTaskSnapshot& task) {
-    std::vector<std::wstring> parts;
-    if (!task.qualityLabel.empty()) {
-        parts.push_back(L"Качество: " + task.qualityLabel);
-    }
-    if (!task.etaText.empty() && (task.state == DownloadTaskState::Preparing || task.state == DownloadTaskState::Downloading)) {
-        parts.push_back(L"ETA: " + task.etaText);
-    }
-    if (task.totalBytes > 0) {
-        parts.push_back(BytesText(task.downloadedBytes) + L" / " + BytesText(task.totalBytes));
-    }
-    std::wstring result;
-    for (const std::wstring& part : parts) {
-        if (!result.empty()) {
-            result += L"  |  ";
-        }
-        result += part;
-    }
-    return result;
 }
 
 RECT QueuePanelRectForClient(const RECT& client) {
@@ -553,12 +521,14 @@ constexpr UINT kWorkersPlus = 141;
 constexpr UINT kAutoCheck = 142;
 constexpr UINT kFfmpegConfigure = 143;
 constexpr UINT kFfmpegDetails = 144;
+constexpr UINT kSettingsCheckUpdates = 145;
 constexpr UINT kLogCopyAll = 201;
 constexpr UINT kLogClose = 202;
 constexpr UINT kDialogInstall = 301;
 constexpr UINT kDialogChoose = 302;
 constexpr UINT kDialogClose = 303;
 constexpr UINT kDialogDone = WM_APP + 30;
+constexpr UINT kUpdateFoundMessage = WM_APP + 80;
 constexpr const wchar_t* kLogViewClassName = L"BoostyLogView";
 constexpr const wchar_t* kLogCopyMenuClassName = L"BoostyLogCopyMenu";
 constexpr int kScrollTextTopPadding = 12;
@@ -643,6 +613,14 @@ struct FfmpegDialogState {
     UINT hotButton = 0;
     UINT pressedButton = 0;
     std::jthread worker;
+};
+
+struct UpdatePromptState {
+    std::wstring message;
+    bool accepted = false;
+    std::vector<DialogButton> buttons;
+    UINT hotButton = 0;
+    UINT pressedButton = 0;
 };
 
 DialogButton* HitDialogButton(std::vector<DialogButton>& buttons, POINT point) {
@@ -1183,9 +1161,11 @@ void LayoutSettingsButtons(SettingsState* state, const RECT& client) {
             {kFfmpegDetails, {card.right - 142, card.top + 18, card.right - 18, card.top + 52}, state->ffmpegDetailsExpanded ? L"Скрыть" : L"Подробнее", state->ffmpegDetailsExpanded, true, true, true}
         });
     } else if (state->section == SettingsSection::About) {
-        RECT card = stackCard(1, 140);
+        RECT appCard = stackCard(0, 158);
+        RECT card{content.left, content.top + 258, content.right, content.top + 398};
         constexpr int autoCheckWidth = 246;
         state->buttons.insert(state->buttons.end(), {
+            {kSettingsCheckUpdates, {appCard.left + 18, appCard.top + 112, appCard.left + 234, appCard.top + 146}, L"Проверить обновления", false, true, true, true},
             {kAutoCheck, {card.right - 18 - autoCheckWidth, card.top + 66, card.right - 18, card.top + 100}, state->config.autoUpdateCheck ? L"Автопроверка: Вкл" : L"Автопроверка: Выкл", state->config.autoUpdateCheck, true, true, true}
         });
     }
@@ -1246,13 +1226,13 @@ void DrawSettingsAbout(HDC dc, const SettingsState* state, const RECT& client) {
     DrawTextLine(dc, L"О программе", {content.left, content.top + 2, content.right, content.top + 36}, 26, RGB(242, 242, 242));
     DrawTextLine(dc, L"Версия приложения и обновления.", {content.left, content.top + 36, content.right, content.top + 64}, 15, RGB(180, 180, 186));
 
-    RECT card{content.left, content.top + 86, content.right, content.top + 202};
+    RECT card{content.left, content.top + 86, content.right, content.top + 244};
     DrawSettingsRoundedPanel(dc, card, Gdiplus::Color(255, 35, 35, 38), Gdiplus::Color(255, 48, 48, 52), 8);
     DrawTextLine(dc, L"Boosty Downloader", {card.left + 18, card.top + 14, card.right - 18, card.top + 38}, 19, RGB(242, 242, 242));
     DrawTextLine(dc, L"Портативный Win32-загрузчик видео с Boosty.", {card.left + 18, card.top + 40, card.right - 18, card.top + 64}, 15, RGB(180, 180, 186));
-    DrawTextLine(dc, L"Версия: 0.1.0", {card.left + 18, card.top + 78, card.right - 18, card.top + 104}, 15, RGB(242, 242, 242));
+    DrawTextLine(dc, std::wstring(L"Версия: ") + kAppVersionWide, {card.left + 18, card.top + 78, card.right - 18, card.top + 104}, 15, RGB(242, 242, 242));
 
-    card = {content.left, content.top + 216, content.right, content.top + 356};
+    card = {content.left, content.top + 258, content.right, content.top + 398};
     DrawSettingsRoundedPanel(dc, card, Gdiplus::Color(255, 35, 35, 38), Gdiplus::Color(255, 48, 48, 52), 8);
     DrawTextLine(dc, L"Обновления", {card.left + 18, card.top + 14, card.right - 18, card.top + 38}, 19, RGB(242, 242, 242));
     DrawTextLine(dc, state && state->config.autoUpdateCheck ? L"Автопроверка обновлений включена." : L"Автопроверка обновлений выключена.", {card.left + 18, card.top + 44, card.right - 18, card.top + 68}, 15, RGB(180, 180, 186));
@@ -1280,6 +1260,214 @@ void PaintSettings(HWND window, SettingsState* state, HDC dc) {
         DrawSettingsAbout(dc, state, client);
     }
     DrawSettingsButtons(dc, state->buttons, state->pressedButton, state->hotButton);
+}
+
+bool ShowUpdatePrompt(HWND owner, HINSTANCE instance, const std::wstring& message);
+
+void RunAppUpdateFlow(HWND owner, const AppPaths& paths, bool manual) {
+    HCURSOR oldCursor = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    try {
+        const ReleaseAssetInfo release = AppUpdateService::CheckLatestRelease();
+        SetCursor(oldCursor);
+        if (!ShouldInstallAppUpdate(release)) {
+            if (manual) {
+                ShowCustomMessageDialog(owner, nullptr, L"Обновления", L"Доступных обновлений нет.", MessageDialogKind::Info);
+            }
+            return;
+        }
+
+        const HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(owner, GWLP_HINSTANCE));
+        if (!ShowUpdatePrompt(owner, instance, BuildAppUpdatePromptMessage(release))) {
+            return;
+        }
+
+        oldCursor = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+        const std::filesystem::path downloadedExe = AppUpdateService::DownloadUpdateExe(paths, release);
+        SetCursor(oldCursor);
+        ShowCustomMessageDialog(owner, nullptr, L"Обновление", L"Обновление скачано. Приложение будет закрыто и запущено заново.", MessageDialogKind::Info);
+        AppUpdateService::StartDownloadedUpdate(paths, downloadedExe);
+        HWND root = GetWindow(owner, GW_OWNER);
+        if (!root) {
+            root = GetAncestor(owner, GA_ROOT);
+        }
+        PostMessageW(root ? root : owner, WM_CLOSE, 0, 0);
+    } catch (const std::exception& ex) {
+        SetCursor(oldCursor);
+        if (manual) {
+            const std::wstring message = L"Не удалось проверить или установить обновление:\n" + Utf8ToWide(ex.what());
+            ShowCustomMessageDialog(owner, nullptr, L"Обновления", message, MessageDialogKind::Error);
+        }
+    }
+}
+
+void LayoutUpdatePromptButtons(UpdatePromptState* state, const RECT& client) {
+    if (!state) {
+        return;
+    }
+    constexpr int width = 132;
+    constexpr int height = 34;
+    constexpr int gap = 12;
+    const int bottom = client.bottom - 20;
+    state->buttons = {
+        {kDialogClose, {client.right - 20 - width * 2 - gap, bottom - height, client.right - 20 - width - gap, bottom}, L"Отмена", false, true, true},
+        {kDialogInstall, {client.right - 20 - width, bottom - height, client.right - 20, bottom}, L"Скачать", true, true, true}
+    };
+}
+
+void PaintUpdatePrompt(HWND window, UpdatePromptState* state, HDC dc) {
+    RECT client{};
+    GetClientRect(window, &client);
+    LayoutUpdatePromptButtons(state, client);
+    UiRenderer::DrawBackground(dc, client);
+    RECT panel{14, 14, client.right - 14, client.bottom - 14};
+    DrawSettingsRoundedPanel(dc, panel, Gdiplus::Color(255, 28, 28, 31), Gdiplus::Color(255, 48, 48, 52), 8);
+    DrawTextLine(dc, L"Обновление", {panel.left + 18, panel.top + 18, panel.right - 18, panel.top + 48}, 22, RGB(242, 242, 242));
+    DrawTextLine(dc, state ? state->message : L"", {panel.left + 18, panel.top + 58, panel.right - 18, panel.bottom - 70}, 15, RGB(180, 180, 186), DT_WORDBREAK);
+    if (state) {
+        DrawSettingsButtons(dc, state->buttons, state->pressedButton, state->hotButton);
+    }
+}
+
+LRESULT CALLBACK UpdatePromptProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<UpdatePromptState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = static_cast<UpdatePromptState*>(create->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+        return TRUE;
+    }
+
+    switch (message) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEMOVE: {
+        if (!state) {
+            return 0;
+        }
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        DialogButton* hit = HitDialogButton(state->buttons, point);
+        const UINT hot = hit ? hit->id : 0;
+        if (hot != state->hotButton) {
+            state->hotButton = hot;
+            InvalidateRect(window, nullptr, FALSE);
+            TRACKMOUSEEVENT event{sizeof(event), TME_LEAVE, window, 0};
+            TrackMouseEvent(&event);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (state) {
+            state->hotButton = 0;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        if (!state) {
+            return 0;
+        }
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (DialogButton* hit = HitDialogButton(state->buttons, point)) {
+            state->pressedButton = hit->id;
+            SetCapture(window);
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        if (!state) {
+            return 0;
+        }
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const UINT pressed = state->pressedButton;
+        state->pressedButton = 0;
+        ReleaseCapture();
+        InvalidateRect(window, nullptr, FALSE);
+        if (DialogButton* hit = HitDialogButton(state->buttons, point); hit && hit->id == pressed) {
+            state->accepted = hit->id == kDialogInstall;
+            DestroyWindow(window);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            DestroyWindow(window);
+            return 0;
+        }
+        if (wParam == VK_RETURN && state) {
+            state->accepted = true;
+            DestroyWindow(window);
+            return 0;
+        }
+        break;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(window, &ps);
+        RECT client{};
+        GetClientRect(window, &client);
+        HDC memoryDc = CreateCompatibleDC(dc);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right - client.left, client.bottom - client.top);
+        HGDIOBJ oldBitmap = SelectObject(memoryDc, bitmap);
+        PaintUpdatePrompt(window, state, memoryDc);
+        BitBlt(dc, 0, 0, client.right - client.left, client.bottom - client.top, memoryDc, 0, 0, SRCCOPY);
+        SelectObject(memoryDc, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(memoryDc);
+        EndPaint(window, &ps);
+        return 0;
+    }
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+bool ShowUpdatePrompt(HWND owner, HINSTANCE instance, const std::wstring& message) {
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = UpdatePromptProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = CreateSolidBrush(RGB(18, 18, 20));
+    wc.lpszClassName = L"BoostyUpdatePromptWindow";
+    RegisterClassW(&wc);
+
+    UpdatePromptState state{};
+    state.message = message;
+    RECT ownerRect{};
+    GetWindowRect(owner, &ownerRect);
+    constexpr int width = 520;
+    constexpr int height = 224;
+    HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        wc.lpszClassName,
+        L"Обновление",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        ownerRect.left + ((ownerRect.right - ownerRect.left) - width) / 2,
+        ownerRect.top + ((ownerRect.bottom - ownerRect.top) - height) / 2,
+        width,
+        height,
+        owner,
+        nullptr,
+        instance,
+        &state
+    );
+    if (!dialog) {
+        return false;
+    }
+    EnableDarkTitleBar(dialog);
+    EnableWindow(owner, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+
+    MSG messageLoop{};
+    while (IsWindow(dialog) && GetMessageW(&messageLoop, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dialog, &messageLoop)) {
+            TranslateMessage(&messageLoop);
+            DispatchMessageW(&messageLoop);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetActiveWindow(owner);
+    return state.accepted;
 }
 
 void HandleSettingsCommand(HWND window, SettingsState* state, UINT id) {
@@ -1330,6 +1518,11 @@ void HandleSettingsCommand(HWND window, SettingsState* state, UINT id) {
     case kAutoCheck:
         state->config.autoUpdateCheck = !state->config.autoUpdateCheck;
         InvalidateRect(window, nullptr, FALSE);
+        break;
+    case kSettingsCheckUpdates:
+        if (state->paths) {
+            RunAppUpdateFlow(window, *state->paths, true);
+        }
         break;
     case kFfmpegConfigure:
         if (state->paths && ShowFfmpegModal(window, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(window, GWLP_HINSTANCE)), *state->paths, state->config)) {
@@ -2116,18 +2309,20 @@ int Application::Run(HINSTANCE instance, int showCommand) {
 }
 
 bool Application::CreateMainWindow(int showCommand) {
-    WNDCLASSW wc = {};
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = Application::WindowProc;
     wc.hInstance = m_instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(m_instance, MAKEINTRESOURCEW(kAppIcon));
+    wc.hIcon = static_cast<HICON>(LoadImageW(m_instance, MAKEINTRESOURCEW(kAppIcon), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(m_instance, MAKEINTRESOURCEW(kAppIcon), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
     wc.lpszClassName = L"BoostyDownloaderWindow";
-    RegisterClassW(&wc);
+    RegisterClassExW(&wc);
 
     m_window = CreateWindowExW(
         0,
         wc.lpszClassName,
-        L"Boosty Downloader",
+        L"",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
@@ -2142,9 +2337,11 @@ bool Application::CreateMainWindow(int showCommand) {
         return false;
     }
     EnableDarkTitleBar(m_window);
-    if (HICON icon = LoadIconW(m_instance, MAKEINTRESOURCEW(kAppIcon))) {
-        SendMessageW(m_window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
-        SendMessageW(m_window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
+    if (HICON bigIcon = static_cast<HICON>(LoadImageW(m_instance, MAKEINTRESOURCEW(kAppIcon), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR))) {
+        SendMessageW(m_window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(bigIcon));
+    }
+    if (HICON smallIcon = static_cast<HICON>(LoadImageW(m_instance, MAKEINTRESOURCEW(kAppIcon), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR))) {
+        SendMessageW(m_window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
     }
 
     ShowWindow(m_window, showCommand);
@@ -2168,6 +2365,13 @@ LRESULT Application::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_CREATE:
         Initialize();
         return 0;
+    case kUpdateFoundMessage: {
+        std::unique_ptr<ReleaseAssetInfo> release(reinterpret_cast<ReleaseAssetInfo*>(lParam));
+        if (m_paths && release && ShouldInstallAppUpdate(*release)) {
+            RunAppUpdateFlow(m_window, *m_paths, false);
+        }
+        return 0;
+    }
     case WM_SIZE:
         Layout();
         if (m_queue) {
@@ -2372,6 +2576,9 @@ LRESULT Application::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     case WM_DESTROY:
+        if (m_updateWorker.joinable()) {
+            m_updateWorker.request_stop();
+        }
         if (m_queue) {
             SaveDownloadQueue(true);
             m_queue->Shutdown();
@@ -2388,6 +2595,11 @@ void Application::Initialize() {
     m_config = ConfigStore::Load(*m_paths);
     m_logger = std::make_unique<Logger>(*m_paths);
     m_logger->Info(L"Application started: root=" + m_paths->root().wstring());
+    try {
+        AppUpdateService::EnsureLocalSha256Sums(*m_paths);
+    } catch (const std::exception&) {
+        m_logger->Error(L"Failed to write local SHA256SUMS");
+    }
     const FfmpegStatus ffmpeg = ResolveFfmpeg(*m_paths, m_config.ffmpegPath);
     m_logger->Info(ffmpeg.available ? (L"FFmpeg found: " + ffmpeg.executable.wstring()) : L"FFmpeg not found");
     m_queue = std::make_unique<DownloadQueue>(m_config.maxParallelDownloads, m_logger.get());
@@ -2415,6 +2627,7 @@ void Application::Initialize() {
     DragAcceptFiles(m_window, TRUE);
     SetTimer(m_window, kRefreshTimer, 200, nullptr);
     SetStatus(L"Готово");
+    StartAutoUpdateCheck();
     Layout();
 }
 
@@ -2448,7 +2661,7 @@ void Application::AddButtons() {
         {kBtnPaste, {sideButtonLeft, 86, right, 122}, L"Вставить", false},
         {kBtnBrowse, {sideButtonLeft, 152, right, 188}, L"Выбрать...", false},
         {kBtnDownload, {margin, 220, margin + 120, 256}, L"Скачать", true},
-        {kBtnLogin, {margin + 132, 220, margin + 322, 256}, L"Сохранить токен", false},
+        {kBtnLogin, {margin + 132, 220, margin + 322, 256}, L"Получить токен", false},
         {kBtnSettings, {right - 150, 220, right, 256}, L"Настройки", false},
         {kBtnOpenFolder, {right - 540, 284, right - 390, 320}, L"Открыть папку", false},
         {kBtnLogs, {right - 378, 284, right - 288, 320}, L"Логи", false},
@@ -2562,12 +2775,12 @@ void Application::Paint(HDC dc) {
         const int textLeft = thumb.right + 12;
         const int textRight = std::max(textLeft + 180, buttonRight);
         DrawTextLine(dc, L"#" + std::to_wstring(task.id) + L"  " + task.title, {textLeft, row.top + 8, textRight, row.top + 30}, 16, RGB(242, 242, 242));
-        std::wstring status = StateText(task.state) + L" - " + task.statusText;
+        std::wstring status = task.statusText.empty() ? StateText(task.state) : task.statusText;
         if (!task.errorText.empty()) {
             status += L": " + task.errorText;
         }
         DrawTextLine(dc, status, {textLeft, row.top + 32, textRight, row.top + 52}, 14, RGB(180, 180, 186));
-        const std::wstring meta = TaskMetaText(task);
+        const std::wstring meta = FormatTaskMetaText(task);
         if (!meta.empty()) {
             DrawTextLine(dc, meta, {textLeft, row.top + 54, textRight, row.top + 74}, 13, RGB(156, 156, 164));
         }
@@ -2824,6 +3037,26 @@ void Application::ShowSettings() {
     }
 }
 
+void Application::StartAutoUpdateCheck() {
+    if (!m_config.autoUpdateCheck || !m_paths || m_updateWorker.joinable()) {
+        return;
+    }
+    const HWND window = m_window;
+    m_updateWorker = std::jthread([window](std::stop_token stopToken) {
+        try {
+            ReleaseAssetInfo release = AppUpdateService::CheckLatestRelease(stopToken);
+            if (stopToken.stop_requested() || !ShouldInstallAppUpdate(release)) {
+                return;
+            }
+            auto* payload = new ReleaseAssetInfo(std::move(release));
+            if (!PostMessageW(window, kUpdateFoundMessage, 0, reinterpret_cast<LPARAM>(payload))) {
+                delete payload;
+            }
+        } catch (...) {
+        }
+    });
+}
+
 void Application::SaveConfigFromControls() {
     m_config.downloadDir = GetText(m_folderEdit);
     if (m_queue) {
@@ -2889,6 +3122,7 @@ bool Application::RefreshStatus() {
     if (!m_queue) {
         return false;
     }
+    m_queue->RefreshDynamicStats();
     const std::uint64_t revision = m_queue->Revision();
     if (revision != m_lastSavedQueueRevision) {
         SaveDownloadQueue(false);

@@ -27,6 +27,8 @@ struct BoostyProgress {
     std::uint64_t downloadedBytes = 0;
     std::uint64_t totalBytes = 0;
     std::wstring qualityLabel;
+    std::wstring containerLabel;
+    std::wstring progressText;
     std::wstring taskTitle;
     std::wstring thumbnailUrl;
     std::filesystem::path thumbnailPath;

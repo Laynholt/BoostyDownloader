@@ -121,10 +121,13 @@ nlohmann::json TaskToJson(const DownloadTaskSnapshot& task) {
     json["percent"] = task.percent;
     json["status_text"] = WideToUtf8(task.statusText);
     json["error_text"] = WideToUtf8(task.errorText);
+    json["container_label"] = WideToUtf8(task.containerLabel);
     json["quality_label"] = WideToUtf8(task.qualityLabel);
+    json["progress_text"] = WideToUtf8(task.progressText);
     json["eta_text"] = WideToUtf8(task.etaText);
     json["downloaded_bytes"] = task.downloadedBytes;
     json["total_bytes"] = task.totalBytes;
+    json["speed_bytes_per_second"] = task.speedBytesPerSecond;
     json["output_files"] = PathArrayToJson(task.outputFiles);
     json["thumbnail_url"] = WideToUtf8(task.thumbnailUrl);
     json["thumbnail_path"] = PathToJsonString(task.thumbnailPath);
@@ -154,10 +157,13 @@ std::optional<DownloadTaskSnapshot> TaskFromJson(const nlohmann::json& json) {
     task.percent = DoubleFromJson(json, "percent");
     task.statusText = WStringFromJson(json, "status_text");
     task.errorText = WStringFromJson(json, "error_text");
+    task.containerLabel = WStringFromJson(json, "container_label");
     task.qualityLabel = WStringFromJson(json, "quality_label");
+    task.progressText = WStringFromJson(json, "progress_text");
     task.etaText = WStringFromJson(json, "eta_text");
     task.downloadedBytes = UInt64FromJson(json, "downloaded_bytes");
     task.totalBytes = UInt64FromJson(json, "total_bytes");
+    task.speedBytesPerSecond = UInt64FromJson(json, "speed_bytes_per_second");
     task.outputFiles = PathArrayFromJson(json, "output_files");
     task.thumbnailUrl = WStringFromJson(json, "thumbnail_url");
     task.thumbnailPath = PathFromJsonString(json, "thumbnail_path");

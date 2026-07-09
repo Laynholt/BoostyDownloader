@@ -1,4 +1,7 @@
 #include "BoostyClient.h"
+#include "AppUpdateService.h"
+#include "FfmpegTools.h"
+#include "TaskFormatting.h"
 #include "Text.h"
 
 #include <cassert>
@@ -66,4 +69,36 @@ int main() {
     const PostRef ref{L"author", L"734a0fcc-dd95-40df-b02c-8eb4f0ed37ff"};
     assert(BuildTargetPath(request, ref, L"Post Title", 0, 2).filename().wstring() == L"Post Title 01 [734a0fcc].mp4");
     assert(BuildTargetPath(request, ref, L"Post Title", 1, 2).filename().wstring() == L"Post Title 02 [734a0fcc].mp4");
+
+    std::uint64_t convertedMs = 0;
+    if (!TryParseFfmpegProgressTimeMs(L"out_time_ms=1500000", convertedMs) || convertedMs != 1500) {
+        return 1;
+    }
+    if (FormatFfmpegProgressText(1500, 120000) != L"Конвертировано: 00:01 / 02:00") {
+        return 1;
+    }
+    if (FormatFfmpegProgressText(1500, 0) != L"Конвертировано: 00:01") {
+        return 1;
+    }
+
+    DownloadTaskSnapshot task;
+    task.containerLabel = L"MP4";
+    task.qualityLabel = L"1080";
+    task.etaText = L"0:42";
+    task.speedBytesPerSecond = 1'500'000;
+    task.downloadedBytes = 5ull * 1024ull * 1024ull;
+    task.totalBytes = 10ull * 1024ull * 1024ull;
+    if (FormatTaskMetaText(task) != L"MP4  |  1080  |  12.0 Мбит/с  |  ETA 0:42  |  5.0 MB / 10.0 MB") {
+        return 1;
+    }
+
+    const std::string releaseJson = R"({"tag_name":"v1.0.1","assets":[{"name":"BoostyDownloader.exe","browser_download_url":"https://example.test/BoostyDownloader.exe"}]})";
+    const ReleaseAssetInfo release = ParseGitHubReleaseAsset(releaseJson, "BoostyDownloader.exe");
+    if (!release.found || release.version != L"1.0.1" || !ShouldInstallAppUpdate(release)) {
+        return 1;
+    }
+    const std::string sums = "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD *BoostyDownloader.exe\n";
+    if (AppUpdateService::Sha256ForFile(sums, "BoostyDownloader.exe") != L"abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd") {
+        return 1;
+    }
 }

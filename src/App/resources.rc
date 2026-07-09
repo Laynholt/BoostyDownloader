@@ -1,3 +1,5 @@
 #include <windows.h>
 
-1 ICON "../../assets/icon.ico"
+#define IDI_APP_ICON 1
+
+IDI_APP_ICON ICON "../../assets/icon.ico"

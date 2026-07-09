@@ -29,8 +29,11 @@ struct DownloadTaskSnapshot {
     double percent = 0.0;
     std::wstring statusText;
     std::wstring errorText;
+    std::wstring containerLabel;
     std::wstring qualityLabel;
+    std::wstring progressText;
     std::wstring etaText;
+    std::uint64_t speedBytesPerSecond = 0;
     std::uint64_t downloadedBytes = 0;
     std::uint64_t totalBytes = 0;
     std::vector<std::filesystem::path> outputFiles;
@@ -54,6 +57,7 @@ public:
     void ImportSnapshots(const std::vector<DownloadTaskSnapshot>& tasks);
     std::vector<DownloadTaskSnapshot> ExportSnapshots() const;
     std::vector<DownloadTaskSnapshot> ExportSnapshotsForShutdown() const;
+    bool RefreshDynamicStats();
     std::uint64_t Revision() const;
     void Shutdown();
 
@@ -62,7 +66,10 @@ private:
         DownloadTaskSnapshot snapshot;
         bool active = false;
         std::uint64_t progressStartedTick = 0;
+        std::uint64_t lastProgressTick = 0;
         std::uint64_t lastDownloadedBytes = 0;
+        std::uint64_t speedSampleTick = 0;
+        std::uint64_t speedSampleBytes = 0;
     };
 
     void SchedulerLoop();

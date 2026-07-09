@@ -12,7 +12,7 @@ struct AppConfig {
     std::wstring quality = L"highest";
     std::wstring container = L"auto";
     std::filesystem::path ffmpegPath;
-    bool autoUpdateCheck = false;
+    bool autoUpdateCheck = true;
     int maxParallelDownloads = 3;
 };
 

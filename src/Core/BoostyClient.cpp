@@ -300,6 +300,15 @@ std::filesystem::path WithExtension(const std::filesystem::path& path, const std
     return result;
 }
 
+std::wstring ContainerLabel(const std::filesystem::path& path) {
+    std::wstring extension = path.extension().wstring();
+    if (!extension.empty() && extension.front() == L'.') {
+        extension.erase(extension.begin());
+    }
+    std::transform(extension.begin(), extension.end(), extension.begin(), towupper);
+    return extension;
+}
+
 } // namespace
 
 std::wstring ExtractAccessTokenFromCookie(const std::wstring& cookieHeader) {
@@ -374,7 +383,7 @@ BoostyDownloadResult DownloadBoostyVideo(
             const std::wstring qualityLabel = QualityLabel(video.quality);
 
             if (onProgress) {
-                onProgress({L"Скачивание " + qualityLabel, 0.0, 0, 0, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, target});
+                onProgress({L"Скачивание", 0.0, 0, 0, qualityLabel, ContainerLabel(target), {}, postTitle, thumbnailUrl, thumbnailPath, target});
             }
             WinHttpClient::DownloadFile(
                 video.url,
@@ -385,7 +394,7 @@ BoostyDownloadResult DownloadBoostyVideo(
                         return;
                     }
                     const double percent = total > 0 ? (static_cast<double>(downloaded) / static_cast<double>(total)) * 100.0 : 0.0;
-                    onProgress({L"Скачивание " + qualityLabel, percent, downloaded, total, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, target});
+                    onProgress({L"Скачивание", percent, downloaded, total, qualityLabel, ContainerLabel(target), {}, postTitle, thumbnailUrl, thumbnailPath, target});
                 },
                 [&]() { return stopToken.stop_requested(); }
             );
@@ -402,18 +411,30 @@ BoostyDownloadResult DownloadBoostyVideo(
                     throw std::runtime_error("FFmpeg not found");
                 }
                 std::wstring error;
+                const std::wstring conversionStage = audioOnly ? L"Извлечение аудио" : L"Конвертация в " + request.container;
                 if (audioOnly) {
                     finalTarget = WithExtension(target, L".m4a");
                     if (onProgress) {
-                        onProgress({L"Извлечение аудио", 100.0, 0, 0, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, finalTarget});
+                        onProgress({conversionStage, 0.0, 0, 0, qualityLabel, ContainerLabel(finalTarget), {}, postTitle, thumbnailUrl, thumbnailPath, finalTarget});
                     }
                 } else {
                     finalTarget = WithExtension(target, L"." + request.container);
                     if (onProgress) {
-                        onProgress({L"Конвертация в " + request.container, 100.0, 0, 0, qualityLabel, postTitle, thumbnailUrl, thumbnailPath, finalTarget});
+                        onProgress({conversionStage, 0.0, 0, 0, qualityLabel, ContainerLabel(finalTarget), {}, postTitle, thumbnailUrl, thumbnailPath, finalTarget});
                     }
                 }
-                if (!ConvertWithFfmpeg(request.ffmpegPath, target, finalTarget, audioOnly, stopToken, error)) {
+                if (!ConvertWithFfmpeg(
+                        request.ffmpegPath,
+                        target,
+                        finalTarget,
+                        audioOnly,
+                        stopToken,
+                        error,
+                        [&](const FfmpegProgress& progress) {
+                            if (onProgress) {
+                                onProgress({conversionStage, progress.percent, 0, 0, qualityLabel, ContainerLabel(finalTarget), progress.text, postTitle, thumbnailUrl, thumbnailPath, finalTarget});
+                            }
+                        })) {
                     throw std::runtime_error(WideToUtf8(error.empty() ? L"FFmpeg failed" : error).c_str());
                 }
                 std::error_code ec;

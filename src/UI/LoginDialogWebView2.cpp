@@ -3,6 +3,7 @@
 #ifdef BOOSTY_HAS_WEBVIEW2
 
 #include "Config.h"
+#include "MessageDialog.h"
 #include "Text.h"
 #include "UiRenderer.h"
 
@@ -157,13 +158,13 @@ std::wstring ScriptStringResult(LPCWSTR raw) {
 void FinishAuthSave(HWND window, LoginState* state, const std::wstring& cookieHeader, const std::wstring& pageState) {
     const std::wstring token = ExtractAccessTokenFromText(cookieHeader + L"\n" + pageState);
     if (token.empty()) {
-        MessageBoxW(window, L"Access token не найден. Залогиньтесь на Boosty и попробуйте снова.", L"Boosty авторизация", MB_ICONWARNING);
+        ShowCustomMessageDialog(window, nullptr, L"Boosty авторизация", L"Access token не найден. Залогиньтесь на Boosty и попробуйте снова.", MessageDialogKind::Warning);
         return;
     }
     state->auth->cookie = cookieHeader;
     state->auth->authHeader = L"Bearer " + token;
     state->saved = true;
-    MessageBoxW(window, L"Временный токен сохранен.", L"Boosty авторизация", MB_OK);
+    ShowCustomMessageDialog(window, nullptr, L"Boosty авторизация", L"Временный токен сохранен.", MessageDialogKind::Info);
     PostMessageW(window, kAuthSaved, 0, 0);
 }
 
@@ -173,12 +174,12 @@ void SaveAuth(HWND window, LoginState* state) {
     }
     ComPtr<ICoreWebView2_2> webview2;
     if (FAILED(state->webview.As(&webview2))) {
-        MessageBoxW(window, L"WebView2 CookieManager недоступен.", L"Boosty авторизация", MB_ICONERROR);
+        ShowCustomMessageDialog(window, nullptr, L"Boosty авторизация", L"WebView2 CookieManager недоступен.", MessageDialogKind::Error);
         return;
     }
     ComPtr<ICoreWebView2CookieManager> manager;
     if (FAILED(webview2->get_CookieManager(&manager))) {
-        MessageBoxW(window, L"Не удалось прочитать cookies.", L"Boosty авторизация", MB_ICONERROR);
+        ShowCustomMessageDialog(window, nullptr, L"Boosty авторизация", L"Не удалось прочитать cookies.", MessageDialogKind::Error);
         return;
     }
     manager->GetCookies(
@@ -186,7 +187,7 @@ void SaveAuth(HWND window, LoginState* state) {
         Callback<ICoreWebView2GetCookiesCompletedHandler>(
             [window, state](HRESULT error, ICoreWebView2CookieList* list) -> HRESULT {
                 if (FAILED(error) || !list) {
-                    MessageBoxW(window, L"Не удалось получить cookies Boosty.", L"Boosty авторизация", MB_ICONERROR);
+                    ShowCustomMessageDialog(window, nullptr, L"Boosty авторизация", L"Не удалось получить cookies Boosty.", MessageDialogKind::Error);
                     return S_OK;
                 }
                 UINT count = 0;
@@ -244,7 +245,7 @@ LRESULT CALLBACK LoginProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
             Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
                 [window](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
                     if (FAILED(result) || !env) {
-                        MessageBoxW(window, L"Не удалось запустить WebView2 Runtime.", L"Boosty авторизация", MB_ICONERROR);
+                        ShowCustomMessageDialog(window, nullptr, L"Boosty авторизация", L"Не удалось запустить WebView2 Runtime.", MessageDialogKind::Error);
                         return S_OK;
                     }
                     env->CreateCoreWebView2Controller(

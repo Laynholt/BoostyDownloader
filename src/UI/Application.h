@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <memory>
+#include <thread>
 #include <vector>
 
 class Application {
@@ -52,6 +53,7 @@ private:
     void PasteUrl();
     void OpenDownloadFolder();
     void ShowSettings();
+    void StartAutoUpdateCheck();
     void SaveConfigFromControls();
     void LoadDownloadQueue();
     void SaveDownloadQueue(bool forShutdown);
@@ -72,6 +74,7 @@ private:
     AppConfig m_config;
     std::unique_ptr<Logger> m_logger;
     std::unique_ptr<DownloadQueue> m_queue;
+    std::jthread m_updateWorker;
     std::vector<Button> m_buttons;
     std::vector<TaskButton> m_taskButtons;
     std::wstring m_status;
