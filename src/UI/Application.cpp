@@ -3197,17 +3197,34 @@ void Application::Click(UINT id) {
         PasteUrl();
         break;
     case kBtnBrowse: {
-        BROWSEINFOW info = {};
-        info.hwndOwner = m_window;
-        info.lpszTitle = L"Выберите папку загрузки";
-        info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-        if (PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&info)) {
-            wchar_t path[MAX_PATH] = {};
-            if (SHGetPathFromIDListW(item, path)) {
-                SetWindowTextW(m_folderEdit, path);
-                SaveConfigFromControls();
+        IFileOpenDialog* dialog = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+            DWORD options = 0;
+            if (SUCCEEDED(dialog->GetOptions(&options))) {
+                dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
             }
-            CoTaskMemFree(item);
+            dialog->SetTitle(L"Выберите папку загрузки");
+
+            IShellItem* initialFolder = nullptr;
+            const std::wstring currentPath = GetText(m_folderEdit);
+            if (SUCCEEDED(SHCreateItemFromParsingName(currentPath.c_str(), nullptr, IID_PPV_ARGS(&initialFolder)))) {
+                dialog->SetFolder(initialFolder);
+                initialFolder->Release();
+            }
+
+            if (SUCCEEDED(dialog->Show(m_window))) {
+                IShellItem* item = nullptr;
+                if (SUCCEEDED(dialog->GetResult(&item))) {
+                    PWSTR path = nullptr;
+                    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                        SetWindowTextW(m_folderEdit, path);
+                        SaveConfigFromControls();
+                        CoTaskMemFree(path);
+                    }
+                    item->Release();
+                }
+            }
+            dialog->Release();
         }
         break;
     }
