@@ -1,6 +1,8 @@
 #include "WinHttpClient.h"
 
 #include "FileOperations.h"
+#include "ErrorFormatting.h"
+#include "Text.h"
 
 #include <winhttp.h>
 
@@ -48,9 +50,8 @@ struct HttpRequest {
 };
 
 std::runtime_error LastError(const char* context) {
-    std::ostringstream out;
-    out << context << " (Win32 error " << GetLastError() << ")";
-    return std::runtime_error(out.str());
+    const DWORD code = GetLastError();
+    return std::runtime_error(WideToUtf8(WindowsErrorDetails(Utf8ToWide(context), code)));
 }
 
 UrlParts CrackUrl(const std::wstring& url) {
@@ -93,7 +94,9 @@ std::wstring HeaderBlock(const HttpHeaders& headers) {
 DWORD QueryStatusCode(HINTERNET request) {
     DWORD status = 0;
     DWORD size = sizeof(status);
-    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX)) {
+        throw LastError("failed to query HTTP status");
+    }
     return status;
 }
 
@@ -188,14 +191,14 @@ std::string WinHttpClient::GetString(const std::wstring& url, const HttpHeaders&
         ThrowIfCanceled(isCanceled);
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(request.get(), &available)) {
-            throw std::runtime_error("failed to query HTTP data");
+            throw LastError("failed to query HTTP data");
         }
         if (available == 0) {
             break;
         }
         DWORD read = 0;
         if (!WinHttpReadData(request.get(), buffer.data(), std::min<DWORD>(available, static_cast<DWORD>(buffer.size())), &read)) {
-            throw std::runtime_error("failed to read HTTP data");
+            throw LastError("failed to read HTTP data");
         }
         result.append(buffer.data(), buffer.data() + read);
     }
@@ -212,7 +215,7 @@ void WinHttpClient::DownloadFile(
     std::error_code ec;
     std::filesystem::create_directories(target.parent_path(), ec);
     if (ec) {
-        throw std::runtime_error("failed to create download directory");
+        throw std::runtime_error(WideToUtf8(WindowsErrorDetails(L"failed to create download directory", ec.value())));
     }
 
     const std::filesystem::path staged = target.wstring() + L".download";
@@ -268,14 +271,14 @@ void WinHttpClient::DownloadFile(
             ThrowIfCanceled(isCanceled);
             DWORD available = 0;
             if (!WinHttpQueryDataAvailable(request.get(), &available)) {
-                throw std::runtime_error("failed to query HTTP data");
+                throw LastError("failed to query HTTP data");
             }
             if (available == 0) {
                 break;
             }
             DWORD read = 0;
             if (!WinHttpReadData(request.get(), buffer.data(), std::min<DWORD>(available, static_cast<DWORD>(buffer.size())), &read)) {
-                throw std::runtime_error("failed to read HTTP data");
+                throw LastError("failed to read HTTP data");
             }
             out.write(buffer.data(), static_cast<std::streamsize>(read));
             if (!out) {

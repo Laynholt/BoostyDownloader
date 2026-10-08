@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(BoostyDownloader
-    VERSION 1.0.2
+    VERSION 1.1.0
     DESCRIPTION "Portable Win32 Boosty video downloader"
     LANGUAGES CXX
 )
@@ -75,6 +75,8 @@ add_executable(BoostyDownloader WIN32
     src/Core/FfmpegTools.h
     src/Core/Logger.cpp
     src/Core/Logger.h
+    src/Core/ErrorFormatting.cpp
+    src/Core/ErrorFormatting.h
     src/Core/TaskFormatting.cpp
     src/Core/TaskFormatting.h
     src/Core/Text.cpp
@@ -142,6 +144,8 @@ add_executable(BoostyDownloaderSelfTest
     src/Core/DownloadQueue.h
     src/Core/Logger.cpp
     src/Core/Logger.h
+    src/Core/ErrorFormatting.cpp
+    src/Core/ErrorFormatting.h
     src/Core/TaskFormatting.cpp
     src/Core/TaskFormatting.h
     src/Core/FfmpegTools.cpp

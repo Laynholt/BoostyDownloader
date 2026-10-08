@@ -1,6 +1,7 @@
 #include "FfmpegTools.h"
 
 #include "Text.h"
+#include "ErrorFormatting.h"
 #include "WinHttpClient.h"
 
 #ifndef NOMINMAX
@@ -107,7 +108,8 @@ void RunProcessCancelable(std::wstring command, const FfmpegInstallCancelCallbac
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        throw std::runtime_error("failed to start process");
+        const DWORD code = GetLastError();
+        throw std::runtime_error(WideToUtf8(WindowsErrorDetails(L"failed to start process", code)));
     }
 
     DWORD wait = WAIT_TIMEOUT;
@@ -126,9 +128,8 @@ void RunProcessCancelable(std::wstring command, const FfmpegInstallCancelCallbac
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     if (exitCode != 0) {
-        throw std::runtime_error("process failed");
+        throw std::runtime_error(WideToUtf8(std::wstring(failureMessage) + L" (exit code " + std::to_wstring(exitCode) + L")"));
     }
-    (void)failureMessage;
 }
 
 void ExtractZip(const std::filesystem::path& archive, const std::filesystem::path& extractDir, const FfmpegInstallCancelCallback& isCanceled) {
@@ -356,7 +357,8 @@ bool RunFfmpegConvert(
     HANDLE readPipe = nullptr;
     HANDLE writePipe = nullptr;
     if (!CreatePipe(&readPipe, &writePipe, &security, 0)) {
-        errorText = L"failed to create FFmpeg progress pipe";
+        const DWORD code = GetLastError();
+        errorText = WindowsErrorDetails(L"failed to create FFmpeg progress pipe", code);
         return false;
     }
     SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
@@ -369,9 +371,10 @@ bool RunFfmpegConvert(
     PROCESS_INFORMATION process{};
     std::wstring command = Quote(ffmpegExe) + L" " + arguments;
     if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        const DWORD code = GetLastError();
         CloseHandle(readPipe);
         CloseHandle(writePipe);
-        errorText = L"failed to start FFmpeg";
+        errorText = WindowsErrorDetails(L"failed to start FFmpeg", code);
         return false;
     }
     CloseHandle(writePipe);
@@ -451,7 +454,7 @@ bool RunFfmpegConvert(
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     if (exitCode != 0) {
-        errorText = processOutput.empty() ? L"FFmpeg failed" : Trim(processOutput);
+        errorText = L"FFmpeg failed (exit code " + std::to_wstring(exitCode) + L"): " + Trim(processOutput);
         return false;
     }
     if (totalMs > 0) {
@@ -592,8 +595,8 @@ bool InstallFfmpeg(
         errorText = Utf8ToWide(ex.what());
         if (errorText == L"operation canceled") {
             errorText = L"Установка отменена.";
-        } else if (errorText.empty()) {
-            errorText = L"Установка FFmpeg не выполнена.";
+        } else {
+            errorText = FormatErrorDetails(errorText);
         }
         return false;
     }

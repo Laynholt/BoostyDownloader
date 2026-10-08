@@ -3,6 +3,7 @@
 #include "AppUpdateService.h"
 #include "AppVersion.h"
 #include "DownloadQueueStore.h"
+#include "ErrorFormatting.h"
 #include "FfmpegTools.h"
 #include "LoginDialog.h"
 #include "MessageDialog.h"
@@ -1646,7 +1647,7 @@ void RunAppUpdateFlow(HWND owner, const AppPaths& paths, bool manual) {
     } catch (const std::exception& ex) {
         SetCursor(oldCursor);
         if (manual) {
-            const std::wstring message = L"Не удалось проверить или установить обновление:\n" + Utf8ToWide(ex.what());
+            const std::wstring message = L"Не удалось проверить или установить обновление:\n" + FormatErrorDetails(Utf8ToWide(ex.what()));
             ShowCustomMessageDialog(owner, nullptr, L"Обновления", message, MessageDialogKind::Error);
         }
     }
@@ -2934,8 +2935,8 @@ void Application::Initialize() {
     m_logger->Info(L"Application started: root=" + m_paths->root().wstring());
     try {
         AppUpdateService::EnsureLocalSha256Sums(*m_paths);
-    } catch (const std::exception&) {
-        m_logger->Error(L"Failed to write local SHA256SUMS");
+    } catch (const std::exception& ex) {
+        m_logger->Error(L"Не удалось записать контрольные суммы приложения: " + FormatErrorDetails(Utf8ToWide(ex.what())));
     }
     const FfmpegStatus ffmpeg = ResolveFfmpeg(*m_paths, m_config.ffmpegPath);
     m_logger->Info(ffmpeg.available ? (L"FFmpeg found: " + ffmpeg.executable.wstring()) : L"FFmpeg not found");
@@ -3114,7 +3115,7 @@ void Application::Paint(HDC dc) {
         DrawTextLine(dc, L"#" + std::to_wstring(task.id) + L"  " + task.title, {textLeft, row.top + 8, textRight, row.top + 30}, 16, RGB(242, 242, 242));
         std::wstring status = task.statusText.empty() ? StateText(task.state) : task.statusText;
         if (!task.errorText.empty()) {
-            status += L": " + task.errorText;
+            status += L": " + FormatErrorSummary(task.errorText);
         }
         DrawTextLine(dc, status, {textLeft, row.top + 32, textRight, row.top + 52}, 14, RGB(180, 180, 186));
         const std::wstring meta = FormatTaskMetaText(task);
@@ -3450,9 +3451,9 @@ void Application::LoadDownloadQueue() {
             }
         }
         m_lastSavedQueueRevision = m_queue->Revision();
-    } catch (const std::exception&) {
+    } catch (const std::exception& ex) {
         if (m_logger) {
-            m_logger->Error(L"Failed to restore download queue");
+            m_logger->Error(L"Не удалось восстановить очередь загрузок: " + FormatErrorDetails(Utf8ToWide(ex.what())));
         }
     }
 }
@@ -3467,9 +3468,9 @@ void Application::SaveDownloadQueue(bool forShutdown) {
             forShutdown ? m_queue->ExportSnapshotsForShutdown() : m_queue->ExportSnapshots()
         );
         m_lastSavedQueueRevision = m_queue->Revision();
-    } catch (const std::exception&) {
+    } catch (const std::exception& ex) {
         if (m_logger) {
-            m_logger->Error(L"Failed to save download queue");
+            m_logger->Error(L"Не удалось сохранить очередь загрузок: " + FormatErrorDetails(Utf8ToWide(ex.what())));
         }
     }
 }

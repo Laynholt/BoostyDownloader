@@ -1,6 +1,7 @@
 #include "DownloadQueue.h"
 
 #include "Logger.h"
+#include "ErrorFormatting.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -514,7 +515,7 @@ void DownloadQueue::FinishTask(int id, std::stop_token stopToken, const BoostyDo
         it->second.snapshot.errorText = result.errorText;
         it->second.snapshot.etaText.clear();
         if (m_logger) {
-            m_logger->Error(L"Task #" + std::to_wstring(id) + L" failed: " + result.errorText);
+            m_logger->Error(L"Задача #" + std::to_wstring(id) + L": " + FormatErrorDetails(result.errorText));
         }
     }
     ++m_revision;

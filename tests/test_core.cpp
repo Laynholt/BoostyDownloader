@@ -1,20 +1,121 @@
 #include "BoostyClient.h"
 #include "AppUpdateService.h"
 #include "FfmpegTools.h"
+#include "ErrorFormatting.h"
+#include "Logger.h"
 #include "TaskFormatting.h"
 #include "Text.h"
 
 #include <cstdlib>
+#include <chrono>
+#include <cstdio>
+#include <source_location>
 
 #include "../src/Core/BoostyClient.cpp"
 
-void Require(bool condition) {
+void Require(bool condition, const std::source_location& location = std::source_location::current()) {
     if (!condition) {
+        std::fprintf(stderr, "Check failed at %s:%u\n", location.file_name(), location.line());
         std::abort();
     }
 }
 
+void CheckErrorFormatting() {
+    const std::pair<const wchar_t*, const wchar_t*> cases[] = {
+        {L"HTTP request failed (Win32 error 12029)", L"подключиться"},
+        {L"failed to read HTTP data (Win32 error 12030)", L"прервано"},
+        {L"HTTP request failed (Win32 error 12002)", L"время ожидания"},
+        {L"HTTP request failed (Win32 error 12007)", L"адрес сервера"},
+        {L"HTTP request failed (Win32 error 12175)", L"защищённое соединение"},
+        {L"HTTP request failed with status 401", L"авторизац"},
+        {L"HTTP request failed with status 403", L"доступ"},
+        {L"HTTP request failed with status 404", L"не найден"},
+        {L"HTTP request failed with status 407", L"прокси"},
+        {L"HTTP request failed with status 429", L"Слишком много запросов"},
+        {L"HTTP request failed with status 503", L"сервер"},
+        {L"HTTP request failed with status 418", L"Сервер отклонил запрос"},
+        {L"failed to commit downloaded file (Win32 error 5)", L"доступ"},
+        {L"failed to write downloaded data (Win32 error 112)", L"места"},
+        {L"failed to open download target", L"файл"},
+        {L"download size validation failed", L"не полностью"},
+        {L"Boosty auth is empty", L"авторизац"},
+        {L"post not found or not available", L"Пост"},
+        {L"post has no downloadable Boosty video", L"видео"},
+        {L"invalid Boosty post URL", L"ссылк"},
+        {L"FFmpeg not found", L"FFmpeg"},
+        {L"FFmpeg failed (exit code 1):\nInvalid data found", L"обработать видео"},
+        {L"[json.exception.parse_error.101] unexpected token", L"формат данных"},
+        {L"app update checksum validation failed", L"повреждён"},
+        {L"operation canceled", L"отменена"},
+        {L"unexpected failure: (detail)\nline 2", L"Не удалось выполнить операцию"},
+        {L"HTTP request failed with status 4010", L"Не удалось выполнить операцию"},
+        {L"HTTP request failed (Win32 error malformed)", L"сетевой запрос"},
+        {L"HTTP request failed (Win32 error 999999999999999999999)", L"сетевой запрос"},
+        {L"HTTP request failed (Win32 error 10051)", L"интернет"},
+        {L"invalid URL (Win32 error 12005)", L"ссылк"},
+        {L"invalid URL (Win32 error 12006)", L"ссылк"},
+    };
+    for (const auto& [detail, explanation] : cases) {
+        const std::wstring summary = FormatErrorSummary(detail);
+        if (summary.find(explanation) == std::wstring::npos) {
+            std::fprintf(stderr, "Wrong explanation for: %s\n", WideToUtf8(detail).c_str());
+            Require(false);
+        }
+        Require(summary.find(L"Win32 error") == std::wstring::npos);
+        Require(summary.find(L'\n') == std::wstring::npos);
+        const std::wstring log = FormatErrorDetails(detail);
+        Require(log.starts_with(summary));
+        Require(log.find(detail) != std::wstring::npos);
+    }
+    Require(!FormatErrorSummary(L"").empty());
+    Require(FormatErrorDetails(L"") == FormatErrorSummary(L""));
+    Require(FormatErrorSummary(L"HTTP request failed with status 401").find(L"интернет") == std::wstring::npos);
+
+    const std::wstring windowsDetail = WindowsErrorDetails(L"test operation", ERROR_ACCESS_DENIED);
+    Require(windowsDetail.starts_with(L"test operation (Win32 error 5: "));
+    Require(FormatErrorSummary(windowsDetail).find(L"доступ") != std::wstring::npos);
+    try {
+        WinHttpClient::GetString(L"not a URL");
+        Require(false);
+    } catch (const std::exception& ex) {
+        const std::wstring detail = Utf8ToWide(ex.what());
+        Require(detail.find(L"Win32 error 12005") != std::wstring::npos ||
+            detail.find(L"Win32 error 12006") != std::wstring::npos);
+        Require(FormatErrorSummary(detail).find(L"ссылк") != std::wstring::npos);
+    }
+}
+
+void CheckTaskErrorLog() {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() /
+        (L"boosty-error-test-" + std::to_wstring(GetCurrentProcessId()));
+    {
+        Logger logger{AppPaths(root)};
+        DownloadQueue queue(1, &logger);
+        BoostyDownloadRequest request;
+        request.url = L"https://boosty.to/author/posts/test";
+        const int id = queue.Enqueue(request, L"Error test");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        std::vector<DownloadTaskSnapshot> tasks;
+        do {
+            tasks = queue.Snapshot();
+            if (!tasks.empty() && tasks.front().state == DownloadTaskState::Failed) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } while (std::chrono::steady_clock::now() < deadline);
+        Require(tasks.size() == 1 && tasks.front().state == DownloadTaskState::Failed);
+        Require(tasks.front().errorText == L"Boosty auth is empty");
+        Require(FormatErrorSummary(tasks.front().errorText).find(L"авторизац") != std::wstring::npos);
+        const std::wstring log = logger.ReadAll();
+        Require(log.find(L"[ERROR] Задача #" + std::to_wstring(id) + L": Нет данных авторизации") != std::wstring::npos);
+        Require(log.find(L"(Boosty auth is empty)") != std::wstring::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
 int main() {
+    CheckErrorFormatting();
+    CheckTaskErrorLog();
     const std::wstring cookie = L"_clientId=x; auth=%7B%22accessToken%22%3A%22abc123%22%2C%22refreshToken%22%3A%22def%22%7D; last_acc=x";
     Require(ExtractAccessTokenFromCookie(cookie) == L"abc123");
     Require(ExtractAccessTokenFromText(L"{\\\"accessToken\\\":\\\"from_local_storage\\\"}") == L"from_local_storage");
