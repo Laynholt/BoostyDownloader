@@ -24,7 +24,7 @@ BoostyDownloader - портативное Win32-приложение для ск
 
 ## Использование
 
-Для запуска Release-сборки x64 нужен актуальный пакет [Microsoft Visual C++ Redistributable x64](https://aka.ms/vc14/vc_redist.x64.exe). Если пакет ещё не установлен, установите его перед запуском приложения. Visual Studio для запуска готового EXE не требуется.
+Для запуска Release-сборки x64 нужен актуальный пакет [Microsoft Visual C++ Redistributable x64](https://aka.ms/vc14/vc_redist.x64.exe). Если пакет отсутствует или устарел, установите или обновите его перед запуском приложения. Visual Studio для запуска готового EXE не требуется.
 
 Для входа через встроенное окно также нужен [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download); если он отсутствует, установите Evergreen Runtime. WebView2 SDK нужен только для сборки.
 
